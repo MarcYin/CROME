@@ -14,7 +14,13 @@ from .constants import (
     CROME_DEFAULT_GEOMETRY_COLUMN,
     CROME_DEFAULT_LABEL_COLUMN,
 )
-from .paths import alphaearth_output_root, reference_output_root, sanitize_label, training_output_root
+from .paths import (
+    alphaearth_output_root,
+    prediction_output_root,
+    reference_output_root,
+    sanitize_label,
+    training_output_root,
+)
 
 BBox = tuple[float, float, float, float]
 
@@ -176,12 +182,21 @@ class AlphaEarthTrainingSpec:
             self.alphaearth.year,
         )
 
+    @property
+    def prediction_output_root(self) -> Path:
+        return prediction_output_root(
+            self.alphaearth.output_root,
+            self.alphaearth.aoi_label,
+            self.alphaearth.year,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "alphaearth": self.alphaearth.to_dict(),
             "label_mode": self.label_mode,
             "nodata_label": self.nodata_label,
             "overlap_policy": self.overlap_policy,
+            "prediction_output_root": str(self.prediction_output_root),
             "reference": self.reference.to_dict(),
             "reference_output_root": str(self.reference_output_root),
             "training_output_root": str(self.training_output_root),

@@ -7,7 +7,7 @@ Crop classification workflows for UK crop mapping, currently centered on Sentine
 - legacy workflow scripts still live at the repository root
 - the new package scaffold now lives under `src/crome`
 - the migration/package/bootstrap plan is tracked in `MIGRATION_PLAN.md`
-- the package now includes a working baseline pipeline from AlphaEarth feature raster to CROME-aligned labels, training table, random-forest model, and predicted crop raster
+- the package now includes a working baseline pipeline from native AlphaEarth raster discovery to CROME-aligned labels, training table aggregation, random-forest model, and predicted crop rasters
 - AlphaEarth is treated as native image/AOI input data, while CROME remains a vector hexagon reference source for later 10 m label transfer
 
 ## Key files
@@ -32,8 +32,8 @@ Crop classification workflows for UK crop mapping, currently centered on Sentine
 
 ## Implemented package workflow
 
-1. Download or otherwise provide one AlphaEarth feature raster.
-2. Rasterize CROME vector references onto that raster grid.
-3. Build a feature/label training table.
-4. Train a random-forest baseline model.
-5. Predict a 10 m crop map on an AlphaEarth raster.
+1. Download AlphaEarth imagery or point the package at an existing manifest or raw-output directory.
+2. Discover native AlphaEarth feature rasters and isolate per-feature artifacts.
+3. Rasterize CROME vector references onto each feature raster grid.
+4. Aggregate the feature/label training table across usable rasters.
+5. Train a random-forest baseline model and predict 10 m crop maps per native raster.

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import rasterio
 from affine import Affine
 from rasterio.coords import BoundingBox
@@ -61,3 +62,20 @@ def read_feature_raster_spec(feature_raster_path: Path | str) -> FeatureRasterSp
             bounds=src.bounds,
             nodata=src.nodata,
         )
+
+
+def valid_feature_mask(
+    features: np.ndarray,
+    *,
+    nodata: float | int | None,
+) -> np.ndarray:
+    """Return the valid-pixel mask for one feature block.
+
+    Pixels are valid only when all bands are finite and none of the bands equal a
+    finite nodata sentinel.
+    """
+
+    valid = np.isfinite(features).all(axis=0)
+    if nodata is not None and np.isfinite(nodata):
+        valid &= ~(features == nodata).any(axis=0)
+    return valid

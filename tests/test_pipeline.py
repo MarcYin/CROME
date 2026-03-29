@@ -11,15 +11,28 @@ from shapely.geometry import Polygon
 
 from crome.bands import ALPHAEARTH_BANDS
 from crome.config import AlphaEarthDownloadRequest, AlphaEarthTrainingSpec, CromeReferenceConfig
+from crome.discovery import discover_feature_rasters
 from crome.labeling import rasterize_crome_reference
+from crome.pipeline import run_baseline_pipeline
 from crome.predict import predict_crop_map
 from crome.training import build_training_table, train_random_forest
 
 
-def _write_feature_raster(path: Path) -> None:
+def _write_feature_raster(
+    path: Path,
+    *,
+    nodata: float | None = None,
+    invalid_pixels: tuple[tuple[int, int], ...] = (),
+    value_offset: float = 0.0,
+    x_origin: float = 0.0,
+    y_origin: float = 4.0,
+) -> None:
     data = np.zeros((len(ALPHAEARTH_BANDS), 4, 4), dtype="float32")
-    data[:, :, :2] = 0.0
-    data[:, :, 2:] = 100.0
+    data[:, :, :2] = 0.0 + value_offset
+    data[:, :, 2:] = 100.0 + value_offset
+    if nodata is not None:
+        for row, col in invalid_pixels:
+            data[:, row, col] = nodata
 
     profile = {
         "driver": "GTiff",
@@ -28,8 +41,10 @@ def _write_feature_raster(path: Path) -> None:
         "count": len(ALPHAEARTH_BANDS),
         "dtype": "float32",
         "crs": "EPSG:3857",
-        "transform": from_origin(0, 4, 1, 1),
+        "transform": from_origin(x_origin, y_origin, 1, 1),
     }
+    if nodata is not None:
+        profile["nodata"] = nodata
     with rasterio.open(path, "w", **profile) as dst:
         dst.write(data)
         dst.descriptions = ALPHAEARTH_BANDS
@@ -43,6 +58,19 @@ def _write_reference_geojson(path: Path) -> None:
         crs="EPSG:3857",
     )
     gdf.to_file(path, driver="GeoJSON")
+
+
+def _write_manifest(path: Path, rasters: list[tuple[str, Path]]) -> None:
+    payload = {
+        "images": [
+            {
+                "source_image_id": image_id,
+                "file_path": str(raster.relative_to(path.parent)),
+            }
+            for image_id, raster in rasters
+        ]
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def test_end_to_end_pipeline(tmp_path: Path) -> None:
@@ -94,3 +122,155 @@ def test_end_to_end_pipeline(tmp_path: Path) -> None:
 
     mapping = json.loads(rasterized.label_mapping_path.read_text(encoding="utf-8"))
     assert mapping["label_to_id"] == {"barley": 0, "wheat": 1}
+
+
+def test_training_and_prediction_ignore_finite_feature_nodata(tmp_path: Path) -> None:
+    feature_raster = tmp_path / "alphaearth_nodata.tif"
+    reference_geojson = tmp_path / "crome.geojson"
+    _write_feature_raster(
+        feature_raster,
+        nodata=-9999.0,
+        invalid_pixels=((0, 0),),
+    )
+    _write_reference_geojson(reference_geojson)
+
+    alphaearth = AlphaEarthDownloadRequest(
+        year=2024,
+        output_root=tmp_path / "outputs",
+        aoi_label="east-anglia",
+        bbox=(0.0, 0.0, 4.0, 4.0),
+    )
+    reference = CromeReferenceConfig(
+        source_path=reference_geojson,
+        year=2024,
+        aoi_label="east-anglia",
+    )
+    spec = AlphaEarthTrainingSpec(alphaearth=alphaearth, reference=reference)
+
+    rasterized = rasterize_crome_reference(feature_raster, spec)
+    training_table = build_training_table(
+        feature_raster,
+        rasterized.label_raster_path,
+        tmp_path / "outputs" / "training",
+    )
+    trained = train_random_forest(training_table.table_path, tmp_path / "outputs" / "model")
+    prediction = predict_crop_map(
+        feature_raster,
+        trained.model_path,
+        tmp_path / "outputs" / "prediction.tif",
+    )
+
+    assert training_table.row_count == 15
+    with rasterio.open(prediction.prediction_raster_path) as pred_src:
+        preds = pred_src.read(1)
+    assert preds[0, 0] == -1
+
+
+def test_discover_feature_rasters_reads_manifest_and_filters_feature_files(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "raw"
+    feature_dir.mkdir()
+    first_raster = feature_dir / "alphaearth_a.tif"
+    second_raster = feature_dir / "alphaearth_b.tif"
+    noise_raster = feature_dir / "noise.tif"
+    _write_feature_raster(first_raster)
+    _write_feature_raster(second_raster, value_offset=10.0)
+    with rasterio.open(
+        noise_raster,
+        "w",
+        driver="GTiff",
+        height=4,
+        width=4,
+        count=1,
+        dtype="float32",
+        crs="EPSG:3857",
+        transform=from_origin(0, 4, 1, 1),
+    ) as dst:
+        dst.write(np.zeros((1, 4, 4), dtype="float32"))
+
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(
+        manifest_path,
+        [
+            ("IMAGE_A", first_raster),
+            ("IMAGE_B", second_raster),
+        ],
+    )
+
+    discovered = discover_feature_rasters(manifest_path=manifest_path)
+    assert len(discovered) == 2
+    assert [item.feature_id for item in discovered] == ["alphaearth_a", "alphaearth_b"]
+    assert [item.source_image_id for item in discovered] == ["IMAGE_A", "IMAGE_B"]
+
+
+def test_run_baseline_pipeline_batches_native_feature_rasters(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "raw"
+    feature_dir.mkdir()
+    first_raster = feature_dir / "alphaearth_a.tif"
+    second_raster = feature_dir / "alphaearth_b.tif"
+    reference_geojson = tmp_path / "crome.geojson"
+    manifest_path = tmp_path / "manifest.json"
+    _write_feature_raster(first_raster)
+    _write_feature_raster(second_raster, value_offset=10.0)
+    _write_reference_geojson(reference_geojson)
+    _write_manifest(
+        manifest_path,
+        [
+            ("IMAGE_A", first_raster),
+            ("IMAGE_B", second_raster),
+        ],
+    )
+
+    result = run_baseline_pipeline(
+        feature_input=feature_dir,
+        manifest_path=manifest_path,
+        reference_path=reference_geojson,
+        year=2024,
+        output_root=tmp_path / "outputs",
+        aoi_label="east-anglia",
+    )
+
+    assert len(result.feature_results) == 2
+    assert not result.skipped_features
+    assert result.training_table_path.exists()
+    assert result.model_path.exists()
+    assert result.pipeline_manifest_path.exists()
+
+    for feature in result.feature_results:
+        assert feature.label_raster_path.exists()
+        assert feature.prediction_raster_path is not None
+        with rasterio.open(feature.label_raster_path) as label_src, rasterio.open(
+            feature.prediction_raster_path
+        ) as pred_src:
+            labels = label_src.read(1)
+            preds = pred_src.read(1)
+        valid = labels != -1
+        assert valid.any()
+        assert np.array_equal(labels[valid], preds[valid])
+
+    payload = json.loads(result.pipeline_manifest_path.read_text(encoding="utf-8"))
+    assert payload["feature_count"] == 2
+    assert payload["skipped_feature_count"] == 0
+
+
+def test_run_baseline_pipeline_skips_rasters_without_reference_coverage(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "raw"
+    feature_dir.mkdir()
+    covered_raster = feature_dir / "covered.tif"
+    uncovered_raster = feature_dir / "uncovered.tif"
+    reference_geojson = tmp_path / "crome.geojson"
+    _write_feature_raster(covered_raster)
+    _write_feature_raster(uncovered_raster, x_origin=100.0, y_origin=104.0)
+    _write_reference_geojson(reference_geojson)
+
+    result = run_baseline_pipeline(
+        feature_input=feature_dir,
+        manifest_path=None,
+        reference_path=reference_geojson,
+        year=2024,
+        output_root=tmp_path / "outputs",
+        aoi_label="east-anglia",
+    )
+
+    assert len(result.feature_results) == 1
+    assert len(result.skipped_features) == 1
+    assert result.skipped_features[0].feature_id == "uncovered"

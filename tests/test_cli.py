@@ -41,6 +41,19 @@ def _write_reference_geojson(path: Path) -> None:
     gdf.to_file(path, driver="GeoJSON")
 
 
+def _write_manifest(path: Path, rasters: list[tuple[str, Path]]) -> None:
+    payload = {
+        "images": [
+            {
+                "source_image_id": image_id,
+                "file_path": str(raster.relative_to(path.parent)),
+            }
+            for image_id, raster in rasters
+        ]
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def test_cli_download_alphaearth_dry_run(capsys) -> None:
     exit_code = cli.main(
         [
@@ -239,3 +252,45 @@ def test_cli_end_to_end_pipeline(tmp_path: Path) -> None:
         == 0
     )
     assert prediction_raster.exists()
+
+
+def test_cli_run_baseline_pipeline_from_manifest(tmp_path: Path, capsys) -> None:
+    feature_dir = tmp_path / "raw"
+    feature_dir.mkdir()
+    first_raster = feature_dir / "alphaearth_a.tif"
+    second_raster = feature_dir / "alphaearth_b.tif"
+    reference_geojson = tmp_path / "crome.geojson"
+    manifest_path = tmp_path / "manifest.json"
+    output_root = tmp_path / "outputs"
+    _write_feature_raster(first_raster)
+    _write_feature_raster(second_raster)
+    _write_reference_geojson(reference_geojson)
+    _write_manifest(
+        manifest_path,
+        [
+            ("IMAGE_A", first_raster),
+            ("IMAGE_B", second_raster),
+        ],
+    )
+
+    exit_code = cli.main(
+        [
+            "run-baseline-pipeline",
+            "--manifest-path",
+            str(manifest_path),
+            "--reference-path",
+            str(reference_geojson),
+            "--year",
+            "2024",
+            "--aoi-label",
+            "east-anglia",
+            "--output-root",
+            str(output_root),
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["feature_count"] == 2
+    assert payload["skipped_feature_count"] == 0
+    assert Path(payload["pipeline_manifest_path"]).exists()

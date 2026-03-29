@@ -48,3 +48,4 @@ def test_training_spec_tracks_crome_hexagon_reference_outputs() -> None:
         "data/alphaearth/reference/crome_hex/REF_crome_hex_east-anglia_2024"
     )
     assert spec.training_output_root == Path("data/alphaearth/training/TRAIN_east-anglia_2024")
+    assert spec.prediction_output_root == Path("data/alphaearth/prediction/PRED_east-anglia_2024")

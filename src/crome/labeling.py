@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import geopandas as gpd
+import numpy as np
 import rasterio
 from rasterio.features import rasterize
 from shapely.geometry import box
@@ -25,6 +26,10 @@ class RasterizedReferenceResult:
     label_raster_path: Path
     label_values: tuple[str, ...]
     nodata_label: int
+
+
+class NoReferenceCoverageError(ValueError):
+    """Raised when a feature raster has no usable CROME coverage."""
 
 
 def _has_positive_area_overlaps(gdf: gpd.GeoDataFrame) -> bool:
@@ -72,12 +77,12 @@ def _load_reference_geometries(
     gdf = gdf[gdf[spec.reference.label_column].notna()].copy()
     gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()].copy()
     if gdf.empty:
-        raise ValueError("No valid reference geometries remained after filtering.")
+        raise NoReferenceCoverageError("No valid reference geometries remained after filtering.")
 
     raster_bounds = box(*feature_spec.bounds)
     gdf = gdf[gdf.geometry.intersects(raster_bounds)].copy()
     if gdf.empty:
-        raise ValueError("Reference geometries do not intersect the feature raster bounds.")
+        raise NoReferenceCoverageError("Reference geometries do not intersect the feature raster bounds.")
 
     if spec.overlap_policy == "error" and _has_positive_area_overlaps(gdf):
         raise ValueError("Reference geometries overlap with positive area; overlap_policy='error'.")
@@ -93,6 +98,8 @@ def _label_mapping(gdf: gpd.GeoDataFrame, label_column: str) -> tuple[dict[str, 
 def rasterize_crome_reference(
     feature_raster_path: Path | str,
     spec: AlphaEarthTrainingSpec,
+    *,
+    output_dir: Path | str | None = None,
 ) -> RasterizedReferenceResult:
     """Rasterize CROME vector labels onto the AlphaEarth raster grid."""
 
@@ -100,7 +107,7 @@ def rasterize_crome_reference(
     gdf = _load_reference_geometries(feature_raster_path, spec)
     label_to_id, label_values = _label_mapping(gdf, spec.reference.label_column)
 
-    output_dir = spec.reference_output_root
+    output_dir = Path(output_dir) if output_dir is not None else spec.reference_output_root
     output_dir.mkdir(parents=True, exist_ok=True)
     label_raster_path = output_dir / "labels.tif"
     label_mapping_path = output_dir / "labels.json"
@@ -121,6 +128,8 @@ def rasterize_crome_reference(
         all_touched=spec.reference.all_touched,
         dtype="int32",
     )
+    if not np.any(label_array != spec.nodata_label):
+        raise NoReferenceCoverageError("Reference geometries rasterized to no labeled pixels.")
 
     profile = {
         "driver": "GTiff",

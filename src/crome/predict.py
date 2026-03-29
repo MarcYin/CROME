@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 
-from .features import read_feature_raster_spec
+from .features import read_feature_raster_spec, valid_feature_mask
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +54,7 @@ def predict_crop_map(
             for _, window in src.block_windows(1):
                 features = src.read(window=window, out_dtype="float32")
                 flat_features = features.reshape(features.shape[0], -1).T
-                valid = np.isfinite(flat_features).all(axis=1)
+                valid = valid_feature_mask(features, nodata=feature_spec.nodata).reshape(-1)
                 predicted = np.full(flat_features.shape[0], nodata_label, dtype="int32")
                 if valid.any():
                     valid_frame = pd.DataFrame(flat_features[valid], columns=feature_names)
@@ -64,6 +64,7 @@ def predict_crop_map(
     metadata = {
         "feature_names": list(feature_names),
         "feature_raster_path": str(feature_raster_path),
+        "label_mapping": bundle.get("label_mapping"),
         "model_path": str(model_path),
         "nodata_label": nodata_label,
         "prediction_raster_path": str(output_raster_path),
