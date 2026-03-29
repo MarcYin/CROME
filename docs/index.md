@@ -24,6 +24,7 @@ crome run-baseline-pipeline --feature-input ./download-output --reference-path c
 ```
 
 `run-baseline-pipeline` accepts either a single feature raster, a directory tree of native AlphaEarth GeoTIFFs, or an `edown` manifest via `--manifest-path`.
+When multiple native rasters are present, the batch pipeline keeps one global CROME label mapping across the run and prefers feature-level holdout over pixel-level holdout.
 
 The legacy wrapper is also available as:
 

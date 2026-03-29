@@ -5,6 +5,7 @@ from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 import rasterio
 from rasterio.transform import from_origin
 from shapely.geometry import Polygon
@@ -23,21 +24,32 @@ def _write_feature_raster(
     *,
     nodata: float | None = None,
     invalid_pixels: tuple[tuple[int, int], ...] = (),
+    pattern: str = "split",
     value_offset: float = 0.0,
+    width: int = 4,
+    height: int = 4,
     x_origin: float = 0.0,
     y_origin: float = 4.0,
 ) -> None:
-    data = np.zeros((len(ALPHAEARTH_BANDS), 4, 4), dtype="float32")
-    data[:, :, :2] = 0.0 + value_offset
-    data[:, :, 2:] = 100.0 + value_offset
+    data = np.zeros((len(ALPHAEARTH_BANDS), height, width), dtype="float32")
+    if pattern == "split":
+        split = max(width // 2, 1)
+        data[:, :, :split] = 0.0 + value_offset
+        data[:, :, split:] = 100.0 + value_offset
+    elif pattern == "low":
+        data[:, :, :] = 0.0 + value_offset
+    elif pattern == "high":
+        data[:, :, :] = 100.0 + value_offset
+    else:
+        raise ValueError(f"Unsupported pattern: {pattern}")
     if nodata is not None:
         for row, col in invalid_pixels:
             data[:, row, col] = nodata
 
     profile = {
         "driver": "GTiff",
-        "height": 4,
-        "width": 4,
+        "height": height,
+        "width": width,
         "count": len(ALPHAEARTH_BANDS),
         "dtype": "float32",
         "crs": "EPSG:3857",
@@ -205,18 +217,21 @@ def test_discover_feature_rasters_reads_manifest_and_filters_feature_files(tmp_p
 def test_run_baseline_pipeline_batches_native_feature_rasters(tmp_path: Path) -> None:
     feature_dir = tmp_path / "raw"
     feature_dir.mkdir()
-    first_raster = feature_dir / "alphaearth_a.tif"
-    second_raster = feature_dir / "alphaearth_b.tif"
+    first_raster = feature_dir / "alphaearth_full.tif"
+    second_raster = feature_dir / "alphaearth_left.tif"
+    third_raster = feature_dir / "alphaearth_right.tif"
     reference_geojson = tmp_path / "crome.geojson"
     manifest_path = tmp_path / "manifest.json"
     _write_feature_raster(first_raster)
-    _write_feature_raster(second_raster, value_offset=10.0)
+    _write_feature_raster(second_raster, pattern="low", width=2, x_origin=0.0)
+    _write_feature_raster(third_raster, pattern="high", width=2, x_origin=2.0)
     _write_reference_geojson(reference_geojson)
     _write_manifest(
         manifest_path,
         [
-            ("IMAGE_A", first_raster),
-            ("IMAGE_B", second_raster),
+            ("IMAGE_FULL", first_raster),
+            ("IMAGE_LEFT", second_raster),
+            ("IMAGE_RIGHT", third_raster),
         ],
     )
 
@@ -229,11 +244,15 @@ def test_run_baseline_pipeline_batches_native_feature_rasters(tmp_path: Path) ->
         aoi_label="east-anglia",
     )
 
-    assert len(result.feature_results) == 2
+    assert len(result.feature_results) == 3
     assert not result.skipped_features
     assert result.training_table_path.exists()
     assert result.model_path.exists()
     assert result.pipeline_manifest_path.exists()
+
+    table = pd.read_pickle(result.training_table_path)
+    assert set(table["feature_id"]) == {"alphaearth_full", "alphaearth_left", "alphaearth_right"}
+    assert set(table["source_image_id"]) == {"IMAGE_FULL", "IMAGE_LEFT", "IMAGE_RIGHT"}
 
     for feature in result.feature_results:
         assert feature.label_raster_path.exists()
@@ -248,7 +267,14 @@ def test_run_baseline_pipeline_batches_native_feature_rasters(tmp_path: Path) ->
         assert np.array_equal(labels[valid], preds[valid])
 
     payload = json.loads(result.pipeline_manifest_path.read_text(encoding="utf-8"))
-    assert payload["feature_count"] == 2
+    assert payload["feature_count"] == 3
+    assert payload["metrics"]["evaluation_mode"] == "feature_holdout"
+    assert sorted(payload["metrics"]["train_feature_ids"] + payload["metrics"]["test_feature_ids"]) == [
+        "alphaearth_full",
+        "alphaearth_left",
+        "alphaearth_right",
+    ]
+    assert payload["metrics"]["label_mapping"]["label_to_id"] == {"barley": 0, "wheat": 1}
     assert payload["skipped_feature_count"] == 0
 
 

@@ -9,9 +9,9 @@ from pathlib import Path
 
 from .config import AlphaEarthDownloadRequest, AlphaEarthTrainingSpec, CromeReferenceConfig
 from .discovery import discover_feature_rasters
-from .labeling import NoReferenceCoverageError, rasterize_crome_reference
+from .labeling import NoReferenceCoverageError, load_reference_label_mapping, rasterize_crome_reference
 from .predict import predict_crop_map
-from .training import build_training_table_from_pairs, train_random_forest
+from .training import TrainingRasterPair, build_training_table_from_pairs, train_random_forest
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,7 +137,8 @@ def run_baseline_pipeline(
 
     processed_features: list[PipelineFeatureResult] = []
     skipped_features: list[SkippedFeatureResult] = []
-    training_pairs: list[tuple[Path, Path]] = []
+    training_pairs: list[TrainingRasterPair] = []
+    global_label_to_id, _ = load_reference_label_mapping(reference_path, label_column)
 
     for feature in discovered:
         output_dir = spec.reference_output_root / "features" / feature.feature_id
@@ -145,6 +146,7 @@ def run_baseline_pipeline(
             rasterized = rasterize_crome_reference(
                 feature.raster_path,
                 spec,
+                label_to_id=global_label_to_id,
                 output_dir=output_dir,
             )
         except NoReferenceCoverageError as exc:
@@ -160,7 +162,14 @@ def run_baseline_pipeline(
             )
             continue
 
-        training_pairs.append((feature.raster_path, rasterized.label_raster_path))
+        training_pairs.append(
+            TrainingRasterPair(
+                feature.raster_path,
+                rasterized.label_raster_path,
+                feature_id=feature.feature_id,
+                source_image_id=feature.source_image_id,
+            )
+        )
         processed_features.append(
             PipelineFeatureResult(
                 feature_id=feature.feature_id,
@@ -186,6 +195,7 @@ def run_baseline_pipeline(
         n_estimators=n_estimators,
         label_mapping_path=processed_features[0].label_mapping_path,
     )
+    metrics_payload = json.loads(trained.metrics_path.read_text(encoding="utf-8"))
 
     finalized_features: list[PipelineFeatureResult] = []
     for feature in processed_features:
@@ -232,6 +242,7 @@ def run_baseline_pipeline(
             for feature in finalized_features
         ],
         "manifest_path": str(manifest_path) if manifest_path is not None else None,
+        "metrics": metrics_payload,
         "metrics_path": str(trained.metrics_path),
         "model_path": str(trained.model_path),
         "prediction_output_root": str(spec.prediction_output_root) if predict else None,

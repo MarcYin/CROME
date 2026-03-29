@@ -11,8 +11,9 @@
 - pure reference-label contracts for CROME hexagon inputs
 - native AlphaEarth raster discovery from directories or manifests
 - rasterization of CROME vectors onto the AlphaEarth 10 m grid
-- training-table creation and aggregation from aligned raster pairs
+- training-table creation and aggregation from aligned raster pairs with feature/source lineage
 - baseline random-forest training and per-raster prediction on the new package boundary
+- batch runs use one global label mapping and prefer feature-level holdout when multiple native rasters are available
 - CPU-safe tests for config, band ordering, rasterization, training, prediction, and CLI behavior
 
 ## Intentionally deferred

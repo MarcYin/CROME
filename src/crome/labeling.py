@@ -95,17 +95,40 @@ def _label_mapping(gdf: gpd.GeoDataFrame, label_column: str) -> tuple[dict[str, 
     return {label: idx for idx, label in enumerate(labels)}, labels
 
 
+def load_reference_label_mapping(
+    reference_path: Path | str,
+    label_column: str,
+) -> tuple[dict[str, int], tuple[str, ...]]:
+    """Build one stable label mapping from the full CROME reference source."""
+
+    gdf = gpd.read_file(reference_path)
+    if label_column not in gdf.columns:
+        raise ValueError(f"Reference data is missing required column: {label_column}")
+    labels = tuple(sorted({str(value) for value in gdf[label_column] if value is not None}))
+    if not labels:
+        raise ValueError("Reference source does not expose any non-null labels.")
+    return {label: idx for idx, label in enumerate(labels)}, labels
+
+
 def rasterize_crome_reference(
     feature_raster_path: Path | str,
     spec: AlphaEarthTrainingSpec,
     *,
+    label_to_id: dict[str, int] | None = None,
     output_dir: Path | str | None = None,
 ) -> RasterizedReferenceResult:
     """Rasterize CROME vector labels onto the AlphaEarth raster grid."""
 
     feature_spec = read_feature_raster_spec(feature_raster_path)
     gdf = _load_reference_geometries(feature_raster_path, spec)
-    label_to_id, label_values = _label_mapping(gdf, spec.reference.label_column)
+    if label_to_id is None:
+        label_to_id, label_values = _label_mapping(gdf, spec.reference.label_column)
+    else:
+        local_labels = {str(value) for value in gdf[spec.reference.label_column]}
+        missing = sorted(local_labels - set(label_to_id))
+        if missing:
+            raise ValueError(f"Provided label mapping is missing labels: {missing}")
+        label_values = tuple(label for label, _ in sorted(label_to_id.items(), key=lambda item: item[1]))
 
     output_dir = Path(output_dir) if output_dir is not None else spec.reference_output_root
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -14,9 +14,11 @@ import pandas as pd
 import rasterio
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
 from .features import read_feature_raster_spec, valid_feature_mask
+from .paths import feature_artifact_name
+from .schema import alphaearth_feature_columns
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +39,33 @@ class TrainedModelResult:
     metrics_path: Path
     model_path: Path
     row_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingRasterPair:
+    """One aligned feature/label raster pair plus optional lineage metadata."""
+
+    feature_raster_path: Path
+    label_raster_path: Path
+    feature_id: str
+    source_image_id: str | None = None
+
+    def __init__(
+        self,
+        feature_raster_path: Path | str,
+        label_raster_path: Path | str,
+        *,
+        feature_id: str | None = None,
+        source_image_id: str | None = None,
+    ) -> None:
+        object.__setattr__(self, "feature_raster_path", Path(feature_raster_path))
+        object.__setattr__(self, "label_raster_path", Path(label_raster_path))
+        object.__setattr__(
+            self,
+            "feature_id",
+            feature_artifact_name(feature_id or feature_raster_path),
+        )
+        object.__setattr__(self, "source_image_id", source_image_id)
 
 
 def _validate_alignment(
@@ -62,22 +91,26 @@ def build_training_table(
 ) -> TrainingTableResult:
     """Extract one feature/label training table from aligned rasters."""
 
-    return build_training_table_from_pairs([(feature_raster_path, label_raster_path)], output_dir)
+    return build_training_table_from_pairs(
+        [TrainingRasterPair(feature_raster_path, label_raster_path)],
+        output_dir,
+    )
 
 
 def _extract_training_rows(
-    feature_raster_path: Path | str,
-    label_raster_path: Path | str,
+    pair: TrainingRasterPair,
 ) -> tuple[tuple[str, ...], int, np.ndarray, np.ndarray]:
     """Extract one feature/label training table from aligned rasters."""
 
-    feature_names, nodata_label = _validate_alignment(feature_raster_path, label_raster_path)
-    feature_spec = read_feature_raster_spec(feature_raster_path)
+    feature_names, nodata_label = _validate_alignment(pair.feature_raster_path, pair.label_raster_path)
+    feature_spec = read_feature_raster_spec(pair.feature_raster_path)
 
     feature_chunks: list[np.ndarray] = []
     label_chunks: list[np.ndarray] = []
 
-    with rasterio.open(feature_raster_path) as feature_src, rasterio.open(label_raster_path) as label_src:
+    with rasterio.open(pair.feature_raster_path) as feature_src, rasterio.open(
+        pair.label_raster_path
+    ) as label_src:
         for _, window in feature_src.block_windows(1):
             features = feature_src.read(window=window, out_dtype="float32")
             labels = label_src.read(1, window=window)
@@ -99,12 +132,17 @@ def _extract_training_rows(
 
 
 def build_training_table_from_pairs(
-    feature_label_pairs: Sequence[tuple[Path | str, Path | str]],
+    feature_label_pairs: Sequence[TrainingRasterPair | tuple[Path | str, Path | str]],
     output_dir: Path | str,
 ) -> TrainingTableResult:
     """Extract one combined feature/label training table from aligned raster pairs."""
 
-    pairs = list(feature_label_pairs)
+    pairs = [
+        pair
+        if isinstance(pair, TrainingRasterPair)
+        else TrainingRasterPair(pair[0], pair[1])
+        for pair in feature_label_pairs
+    ]
     if not pairs:
         raise ValueError("At least one feature/label raster pair is required.")
 
@@ -114,50 +152,53 @@ def build_training_table_from_pairs(
     metadata_path = output_dir / "training_table.json"
 
     feature_names: tuple[str, ...] | None = None
-    feature_chunks: list[np.ndarray] = []
-    label_chunks: list[np.ndarray] = []
+    table_chunks: list[pd.DataFrame] = []
     sources: list[dict[str, object]] = []
 
-    for feature_raster_path, label_raster_path in pairs:
-        pair_feature_names, nodata_label, feature_matrix, label_vector = _extract_training_rows(
-            feature_raster_path, label_raster_path
-        )
+    for pair in pairs:
+        pair_feature_names, nodata_label, feature_matrix, label_vector = _extract_training_rows(pair)
         if feature_names is None:
             feature_names = pair_feature_names
         elif pair_feature_names != feature_names:
             raise ValueError("All feature rasters must expose the same AlphaEarth band order.")
 
-        feature_chunks.append(feature_matrix)
-        label_chunks.append(label_vector)
+        chunk = pd.DataFrame(feature_matrix, columns=feature_names)
+        chunk["feature_id"] = pair.feature_id
+        chunk["source_image_id"] = pair.source_image_id
+        chunk["label_id"] = label_vector
+        table_chunks.append(chunk)
         sources.append(
             {
-                "feature_raster_path": str(feature_raster_path),
-                "label_raster_path": str(label_raster_path),
+                "feature_id": pair.feature_id,
+                "feature_raster_path": str(pair.feature_raster_path),
+                "label_raster_path": str(pair.label_raster_path),
                 "nodata_label": nodata_label,
                 "row_count": int(label_vector.shape[0]),
+                "source_image_id": pair.source_image_id,
             }
         )
 
     if feature_names is None:
         raise ValueError("No aligned feature/label rows were extracted.")
 
-    feature_matrix = np.concatenate(feature_chunks, axis=0)
-    label_vector = np.concatenate(label_chunks, axis=0)
-    table = pd.DataFrame(feature_matrix, columns=feature_names)
-    table["label_id"] = label_vector
+    table = pd.concat(table_chunks, ignore_index=True)
     table.to_pickle(table_path)
 
     metadata = {
         "columns": list(feature_names),
-        "feature_raster_paths": [str(feature_raster_path) for feature_raster_path, _ in pairs],
+        "feature_count": len({pair.feature_id for pair in pairs}),
+        "feature_ids": [pair.feature_id for pair in pairs],
+        "feature_raster_paths": [str(pair.feature_raster_path) for pair in pairs],
         "label_column": "label_id",
-        "label_raster_paths": [str(label_raster_path) for _, label_raster_path in pairs],
+        "label_raster_paths": [str(pair.label_raster_path) for pair in pairs],
+        "lineage_columns": ["feature_id", "source_image_id"],
         "row_count": int(table.shape[0]),
+        "source_image_ids": [pair.source_image_id for pair in pairs],
         "sources": sources,
     }
     if len(pairs) == 1:
-        metadata["feature_raster_path"] = str(pairs[0][0])
-        metadata["label_raster_path"] = str(pairs[0][1])
+        metadata["feature_raster_path"] = str(pairs[0].feature_raster_path)
+        metadata["label_raster_path"] = str(pairs[0].label_raster_path)
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
 
     return TrainingTableResult(
@@ -186,7 +227,11 @@ def train_random_forest(
 
     table = pd.read_pickle(table_path)
     label_column = "label_id"
-    feature_names = [column for column in table.columns if column != label_column]
+    feature_names = [
+        column for column in alphaearth_feature_columns() if column in table.columns
+    ]
+    if tuple(feature_names) != alphaearth_feature_columns():
+        raise ValueError("Training table is missing the canonical AlphaEarth feature columns.")
     X = table[feature_names]
     y = table[label_column]
 
@@ -202,12 +247,53 @@ def train_random_forest(
         "Holdout metrics are computed from a pixel-level split within the provided training table. "
         "They are not tile-level validation metrics."
     )
-    can_hold_out = (
+    train_feature_ids: list[str] | None = None
+    test_feature_ids: list[str] | None = None
+
+    feature_groups = (
+        table["feature_id"]
+        if "feature_id" in table.columns and table["feature_id"].nunique() > 1
+        else None
+    )
+    can_pixel_hold_out = (
         0.0 < test_size < 1.0
         and int(class_counts.min()) >= 2
         and int(np.ceil(len(y) * test_size)) >= len(class_counts)
     )
-    if can_hold_out:
+    if feature_groups is not None and 0.0 < test_size < 1.0:
+        splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
+        train_idx, test_idx = next(splitter.split(X, y, groups=feature_groups))
+        X_train = X.iloc[train_idx]
+        y_train = y.iloc[train_idx]
+        X_test = X.iloc[test_idx]
+        y_test = y.iloc[test_idx]
+        if y_train.nunique() >= 2 and not X_test.empty:
+            evaluation_mode = "feature_holdout"
+            evaluation_note = (
+                "Holdout metrics are computed by holding out whole native AlphaEarth feature rasters "
+                "grouped by feature_id."
+            )
+            train_feature_ids = sorted(str(value) for value in table.iloc[train_idx]["feature_id"].unique())
+            test_feature_ids = sorted(str(value) for value in table.iloc[test_idx]["feature_id"].unique())
+        elif can_pixel_hold_out:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X,
+                y,
+                test_size=test_size,
+                random_state=random_state,
+                stratify=y,
+            )
+        else:
+            X_train = X
+            y_train = y
+            X_test = None
+            y_test = None
+            evaluation_mode = "train_only_no_holdout"
+            evaluation_note = (
+                "Model fitted on the full training table because neither feature-level nor pixel-level "
+                "holdout was valid for the available class counts."
+            )
+    elif can_pixel_hold_out:
         X_train, X_test, y_train, y_test = train_test_split(
             X,
             y,
@@ -253,11 +339,18 @@ def train_random_forest(
         "evaluation_mode": evaluation_mode,
         "evaluation_note": evaluation_note,
         "feature_names": feature_names,
+        "feature_group_count": (
+            int(feature_groups.nunique()) if feature_groups is not None else int(table["feature_id"].nunique())
+            if "feature_id" in table.columns
+            else None
+        ),
         "label_column": label_column,
         "label_mapping": label_mapping,
         "model_type": "RandomForestClassifier",
         "row_count": int(table.shape[0]),
+        "test_feature_ids": test_feature_ids,
         "test_size": test_size,
+        "train_feature_ids": train_feature_ids,
         "training_accuracy": training_accuracy,
     }
 

@@ -34,6 +34,7 @@ Crop classification workflows for UK crop mapping, currently centered on Sentine
 
 1. Download AlphaEarth imagery or point the package at an existing manifest or raw-output directory.
 2. Discover native AlphaEarth feature rasters and isolate per-feature artifacts.
-3. Rasterize CROME vector references onto each feature raster grid.
-4. Aggregate the feature/label training table across usable rasters.
-5. Train a random-forest baseline model and predict 10 m crop maps per native raster.
+3. Rasterize CROME vector references onto each feature raster grid using one global crop label mapping for the whole batch.
+4. Aggregate the feature/label training table across usable rasters, preserving `feature_id` and `source_image_id` lineage.
+5. Train a random-forest baseline model and prefer feature-level holdout when multiple native rasters are available.
+6. Predict 10 m crop maps per native raster.
