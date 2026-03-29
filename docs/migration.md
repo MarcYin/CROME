@@ -10,6 +10,7 @@
 - CLI and legacy wrapper for the new AlphaEarth entry point
 - pure reference-label contracts for CROME hexagon inputs
 - native AlphaEarth raster discovery from directories or manifests
+- one-command download-to-baseline orchestration on top of the `edown` acquisition path
 - rasterization of CROME vectors onto the AlphaEarth 10 m grid
 - training-table creation and aggregation from aligned raster pairs with feature/source lineage
 - baseline random-forest training and per-raster prediction on the new package boundary
@@ -24,5 +25,5 @@
 
 ## Remaining gap
 
-- validate `edown` against one real UK AOI/year and confirm output dtype, CRS, manifest layout, and native-image identity in a Python 3.10-3.12 runtime
+- validate `edown` against one real UK AOI/year and confirm output dtype, CRS, manifest layout, and native-image identity in a Python 3.13 runtime
 - test the batch workflow on real CROME references and real AlphaEarth rasters beyond the synthetic fixture path

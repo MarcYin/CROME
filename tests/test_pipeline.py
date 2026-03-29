@@ -73,14 +73,31 @@ def _write_reference_geojson(path: Path) -> None:
 
 
 def _write_manifest(path: Path, rasters: list[tuple[str, Path]]) -> None:
+    output_root = path.parent.parent if path.parent.name == "manifests" else path.parent
+    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "images": [
-            {
-                "source_image_id": image_id,
-                "file_path": str(raster.relative_to(path.parent)),
-            }
-            for image_id, raster in rasters
-        ]
+        "config": {"output_root": str(output_root)},
+        "download": {
+            "output_root": str(output_root),
+            "results": [
+                {
+                    "image_id": image_id,
+                    "status": "downloaded",
+                    "tiff_path": str(raster.relative_to(output_root)),
+                }
+                for image_id, raster in rasters
+            ],
+        },
+        "schema_version": "0.1.1",
+        "search": {
+            "images": [
+                {
+                    "image_id": image_id,
+                    "relative_tiff_path": str(raster.relative_to(output_root)),
+                }
+                for image_id, raster in rasters
+            ]
+        },
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -199,7 +216,7 @@ def test_discover_feature_rasters_reads_manifest_and_filters_feature_files(tmp_p
     ) as dst:
         dst.write(np.zeros((1, 4, 4), dtype="float32"))
 
-    manifest_path = tmp_path / "manifest.json"
+    manifest_path = feature_dir / "manifests" / "run.json"
     _write_manifest(
         manifest_path,
         [
@@ -221,7 +238,7 @@ def test_run_baseline_pipeline_batches_native_feature_rasters(tmp_path: Path) ->
     second_raster = feature_dir / "alphaearth_left.tif"
     third_raster = feature_dir / "alphaearth_right.tif"
     reference_geojson = tmp_path / "crome.geojson"
-    manifest_path = tmp_path / "manifest.json"
+    manifest_path = feature_dir / "manifests" / "run.json"
     _write_feature_raster(first_raster)
     _write_feature_raster(second_raster, pattern="low", width=2, x_origin=0.0)
     _write_feature_raster(third_raster, pattern="high", width=2, x_origin=2.0)

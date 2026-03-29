@@ -1,5 +1,6 @@
 import pytest
 
+from crome.acquisition.alphaearth import _load_edown
 from crome.config import AlphaEarthDownloadRequest
 
 
@@ -49,3 +50,19 @@ def test_training_spec_requires_matching_aoi_labels() -> None:
                 aoi_label="england-ne",
             ),
         )
+
+
+def test_load_edown_error_mentions_supported_install_path(monkeypatch) -> None:
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "edown":
+            raise ImportError("edown missing")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(RuntimeError, match="pip install edown>=0.1.1"):
+        _load_edown()

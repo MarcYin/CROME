@@ -6,7 +6,7 @@ import argparse
 import sys
 
 from crome.acquisition import alphaearth
-from crome import labeling, pipeline, predict, training
+from crome import labeling, pipeline, predict, training, workflow
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,6 +56,13 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[pipeline_parser],
         add_help=False,
     )
+    workflow_parser = workflow.build_parser()
+    subparsers.add_parser(
+        "download-run-baseline",
+        help=workflow_parser.description or "Download AlphaEarth annual embeddings and run the baseline pipeline.",
+        parents=[workflow_parser],
+        add_help=False,
+    )
     return parser
 
 
@@ -75,4 +82,6 @@ def main(argv: list[str] | None = None) -> int:
         return predict.main(forwarded)
     if args.command == "run-baseline-pipeline":
         return pipeline.main(forwarded)
+    if args.command == "download-run-baseline":
+        return workflow.main(forwarded)
     raise ValueError(f"Unsupported command: {args.command}")

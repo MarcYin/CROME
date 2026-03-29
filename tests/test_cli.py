@@ -42,14 +42,31 @@ def _write_reference_geojson(path: Path) -> None:
 
 
 def _write_manifest(path: Path, rasters: list[tuple[str, Path]]) -> None:
+    output_root = path.parent.parent if path.parent.name == "manifests" else path.parent
+    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "images": [
-            {
-                "source_image_id": image_id,
-                "file_path": str(raster.relative_to(path.parent)),
-            }
-            for image_id, raster in rasters
-        ]
+        "config": {"output_root": str(output_root)},
+        "download": {
+            "output_root": str(output_root),
+            "results": [
+                {
+                    "image_id": image_id,
+                    "status": "downloaded",
+                    "tiff_path": str(raster.relative_to(output_root)),
+                }
+                for image_id, raster in rasters
+            ],
+        },
+        "schema_version": "0.1.1",
+        "search": {
+            "images": [
+                {
+                    "image_id": image_id,
+                    "relative_tiff_path": str(raster.relative_to(output_root)),
+                }
+                for image_id, raster in rasters
+            ]
+        },
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -260,7 +277,7 @@ def test_cli_run_baseline_pipeline_from_manifest(tmp_path: Path, capsys) -> None
     first_raster = feature_dir / "alphaearth_a.tif"
     second_raster = feature_dir / "alphaearth_b.tif"
     reference_geojson = tmp_path / "crome.geojson"
-    manifest_path = tmp_path / "manifest.json"
+    manifest_path = feature_dir / "manifests" / "run.json"
     output_root = tmp_path / "outputs"
     _write_feature_raster(first_raster)
     _write_feature_raster(second_raster)
@@ -294,3 +311,54 @@ def test_cli_run_baseline_pipeline_from_manifest(tmp_path: Path, capsys) -> None
     assert payload["feature_count"] == 2
     assert payload["skipped_feature_count"] == 0
     assert Path(payload["pipeline_manifest_path"]).exists()
+
+
+def test_cli_download_run_baseline(monkeypatch, tmp_path: Path, capsys) -> None:
+    feature_dir = tmp_path / "raw"
+    feature_dir.mkdir()
+    feature_raster = feature_dir / "alphaearth_downloaded.tif"
+    reference_geojson = tmp_path / "crome.geojson"
+    manifest_path = feature_dir / "manifests" / "run.json"
+    output_root = tmp_path / "outputs"
+    _write_feature_raster(feature_raster)
+    _write_reference_geojson(reference_geojson)
+    _write_manifest(manifest_path, [("IMAGE_DOWNLOADED", feature_raster)])
+
+    def fake_download(request):
+        return SimpleNamespace(
+            aoi_label=request.aoi_label,
+            bands=request.bands,
+            collection_id=request.collection_id,
+            conditional_year=request.conditional_year,
+            manifest_path=manifest_path,
+            output_root=feature_dir,
+            source_image_ids=("IMAGE_DOWNLOADED",),
+            year=request.year,
+        )
+
+    monkeypatch.setattr(cli.workflow, "download_alphaearth_images", fake_download)
+
+    exit_code = cli.main(
+        [
+            "download-run-baseline",
+            "--year",
+            "2024",
+            "--aoi-label",
+            "east-anglia",
+            "--bbox",
+            "-1.0",
+            "51.0",
+            "0.0",
+            "52.0",
+            "--reference-path",
+            str(reference_geojson),
+            "--output-root",
+            str(output_root),
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["download"]["manifest_path"] == str(manifest_path)
+    assert payload["pipeline"]["feature_count"] == 1
+    assert Path(payload["pipeline"]["pipeline_manifest_path"]).exists()

@@ -15,7 +15,9 @@
 The current migration commands are:
 
 ```bash
+pip install .[ee]
 crome download-alphaearth --year 2024 --aoi-label east-anglia --bbox -1 51 0 52 --dry-run
+crome download-run-baseline --year 2024 --aoi-label east-anglia --bbox -1 51 0 52 --reference-path crome.geojson --output-root ./outputs
 crome rasterize-reference --feature-raster alphaearth.tif --reference-path crome.geojson --year 2024 --aoi-label east-anglia --output-root ./outputs
 crome build-training-table --feature-raster alphaearth.tif --label-raster ./outputs/reference/crome_hex/REF_crome_hex_east-anglia_2024/labels.tif --output-dir ./outputs/training
 crome train-model --training-table ./outputs/training/training_table.pkl --output-dir ./outputs/model --label-mapping ./outputs/reference/crome_hex/REF_crome_hex_east-anglia_2024/labels.json
@@ -23,6 +25,7 @@ crome predict-map --feature-raster alphaearth.tif --model-path ./outputs/model/m
 crome run-baseline-pipeline --feature-input ./download-output --reference-path crome.geojson --year 2024 --aoi-label east-anglia --output-root ./outputs
 ```
 
+`download-run-baseline` is the shortest operator path when you want the package to call `edown`, discover native AlphaEarth rasters, rasterize CROME labels, train the baseline model, and emit prediction rasters in one pass.
 `run-baseline-pipeline` accepts either a single feature raster, a directory tree of native AlphaEarth GeoTIFFs, or an `edown` manifest via `--manifest-path`.
 When multiple native rasters are present, the batch pipeline keeps one global CROME label mapping across the run and prefers feature-level holdout over pixel-level holdout.
 

@@ -37,10 +37,25 @@ def _load_edown() -> Any:
     except ImportError as exc:
         raise RuntimeError(
             "edown is required for AlphaEarth downloads. Install `crome[ee]` "
-            "with Python 3.12 or earlier."
+            "or `pip install edown>=0.1.1` in the active environment."
         ) from exc
 
     return SimpleNamespace(AOI=AOI, DownloadConfig=DownloadConfig, download_images=download_images)
+
+
+def download_result_to_dict(result: AlphaEarthDownloadResult) -> dict[str, Any]:
+    """Return a JSON-safe summary payload for one AlphaEarth download run."""
+
+    return {
+        "aoi_label": result.aoi_label,
+        "bands": list(result.bands),
+        "collection_id": result.collection_id,
+        "conditional_year": result.conditional_year,
+        "manifest_path": str(result.manifest_path) if result.manifest_path else None,
+        "output_root": str(result.output_root),
+        "source_image_ids": list(result.source_image_ids),
+        "year": result.year,
+    }
 
 
 def _build_aoi(request: AlphaEarthDownloadRequest, edown_module: Any) -> Any:
@@ -213,15 +228,5 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     result = download_alphaearth_images(request)
-    payload = {
-        "aoi_label": result.aoi_label,
-        "bands": list(result.bands),
-        "collection_id": result.collection_id,
-        "conditional_year": result.conditional_year,
-        "manifest_path": str(result.manifest_path) if result.manifest_path else None,
-        "output_root": str(result.output_root),
-        "source_image_ids": list(result.source_image_ids),
-        "year": result.year,
-    }
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    print(json.dumps(download_result_to_dict(result), indent=2, sort_keys=True))
     return 0
