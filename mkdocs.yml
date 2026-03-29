@@ -1,0 +1,8 @@
+site_name: CROME
+site_description: UK crop mapping migration notes and package docs.
+site_url: https://marcyin.github.io/CROME/
+theme:
+  name: material
+nav:
+  - Home: index.md
+  - Migration: migration.md
