@@ -2,7 +2,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
-from crome.acquisition.alphaearth import build_download_config, download_alphaearth_images
+import pytest
+
+from crome.acquisition.alphaearth import (
+    DownloadFailedError,
+    build_download_config,
+    download_alphaearth_images,
+)
 from crome.config import AlphaEarthDownloadRequest
 
 
@@ -71,3 +77,59 @@ def test_download_alphaearth_images_wraps_summary() -> None:
     assert result.manifest_path == Path(
         "data/alphaearth/raw/alphaearth/AEF_east-anglia_annual_embedding_2024/manifest.json"
     )
+
+
+def test_download_alphaearth_images_supports_edown_results_summary_shape() -> None:
+    fake_module = SimpleNamespace(
+        AOI=FakeAOI,
+        DownloadConfig=FakeDownloadConfig,
+        download_images=lambda config: SimpleNamespace(
+            downloaded=1,
+            failed=0,
+            skipped=0,
+            manifest_path=Path(config.output_root) / "manifests" / "run.json",
+            results=(
+                SimpleNamespace(
+                    image_id="GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL/test-image-2",
+                    status="downloaded",
+                ),
+            ),
+        ),
+    )
+    request = AlphaEarthDownloadRequest(
+        year=2024,
+        output_root="data/alphaearth",
+        aoi_label="east-anglia",
+        bbox=(-1.0, 51.0, 0.0, 52.0),
+    )
+
+    result = download_alphaearth_images(request, fake_module)
+    assert result.source_image_ids == ("GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL/test-image-2",)
+    assert result.manifest_path == Path(
+        "data/alphaearth/raw/alphaearth/AEF_east-anglia_annual_embedding_2024/manifests/run.json"
+    )
+
+
+def test_download_alphaearth_images_raises_disk_quota_failure() -> None:
+    fake_module = SimpleNamespace(
+        AOI=FakeAOI,
+        DownloadConfig=FakeDownloadConfig,
+        download_images=lambda _config: SimpleNamespace(
+            downloaded=0,
+            failed=2,
+            skipped=0,
+            results=(
+                SimpleNamespace(image_id="IMG_A", status="failed", error="Disk quota exceeded"),
+                SimpleNamespace(image_id="IMG_B", status="failed", error="Disk quota exceeded"),
+            ),
+        ),
+    )
+    request = AlphaEarthDownloadRequest(
+        year=2024,
+        output_root="data/alphaearth",
+        aoi_label="east-anglia",
+        bbox=(-1.0, 51.0, 0.0, 52.0),
+    )
+
+    with pytest.raises(DownloadFailedError, match="ran out of writable space"):
+        download_alphaearth_images(request, fake_module)

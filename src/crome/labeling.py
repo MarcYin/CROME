@@ -16,6 +16,7 @@ from shapely.geometry import box
 from .config import AlphaEarthDownloadRequest, AlphaEarthTrainingSpec, CromeReferenceConfig
 from .features import read_feature_raster_spec
 from .reference import validate_reference_columns
+from .runtime import ensure_proj_data_env
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +60,7 @@ def _load_reference_geometries(
     spec: AlphaEarthTrainingSpec,
 ) -> gpd.GeoDataFrame:
     feature_spec = read_feature_raster_spec(feature_raster_path)
+    ensure_proj_data_env()
     gdf = gpd.read_file(spec.reference.source_path)
     validate_reference_columns(gdf.columns, spec.reference.label_column, spec.reference.geometry_column)
 
@@ -101,6 +103,7 @@ def load_reference_label_mapping(
 ) -> tuple[dict[str, int], tuple[str, ...]]:
     """Build one stable label mapping from the full CROME reference source."""
 
+    ensure_proj_data_env()
     gdf = gpd.read_file(reference_path)
     if label_column not in gdf.columns:
         raise ValueError(f"Reference data is missing required column: {label_column}")

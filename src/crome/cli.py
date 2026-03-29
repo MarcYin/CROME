@@ -85,3 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "download-run-baseline":
         return workflow.main(forwarded)
     raise ValueError(f"Unsupported command: {args.command}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

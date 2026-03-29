@@ -1,5 +1,8 @@
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import geopandas as gpd
@@ -362,3 +365,38 @@ def test_cli_download_run_baseline(monkeypatch, tmp_path: Path, capsys) -> None:
     assert payload["download"]["manifest_path"] == str(manifest_path)
     assert payload["pipeline"]["feature_count"] == 1
     assert Path(payload["pipeline"]["pipeline_manifest_path"]).exists()
+
+
+def test_python_module_cli_executes_main(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path.cwd() / "src")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "crome.cli",
+            "download-run-baseline",
+            "--year",
+            "2024",
+            "--aoi-label",
+            "east-anglia",
+            "--bbox",
+            "-1.0",
+            "51.0",
+            "0.0",
+            "52.0",
+            "--reference-path",
+            str(tmp_path / "crome.geojson"),
+            "--output-root",
+            str(tmp_path / "outputs"),
+            "--dry-run",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["download"]["aoi_label"] == "east-anglia"
+    assert payload["pipeline"]["reference_path"] == str(tmp_path / "crome.geojson")

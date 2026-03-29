@@ -17,6 +17,10 @@ class NoCoverageError(LookupError):
     """Raised when a download run resolves to no intersecting imagery."""
 
 
+class DownloadFailedError(RuntimeError):
+    """Raised when edown resolves imagery but fails to produce usable rasters."""
+
+
 @dataclass(frozen=True, slots=True)
 class AlphaEarthDownloadResult:
     """Small result surface for the first migration slice."""
@@ -93,6 +97,12 @@ def build_download_config(
 
 
 def _extract_image_count(summary: Any) -> int | None:
+    downloaded = getattr(summary, "downloaded", None)
+    skipped = getattr(summary, "skipped", None)
+    failed = getattr(summary, "failed", None)
+    if any(isinstance(value, int) for value in (downloaded, skipped, failed)):
+        return sum(value for value in (downloaded, skipped, failed) if isinstance(value, int))
+
     for attribute in (
         "downloaded_images",
         "downloaded_image_count",
@@ -134,8 +144,93 @@ def _extract_image_ids(summary: Any) -> tuple[str, ...]:
             for item in value:
                 append_candidate(item)
 
+    results = getattr(summary, "results", None)
+    if isinstance(results, (list, tuple)):
+        for item in results:
+            append_candidate(item)
+
     # Preserve order while removing duplicates.
     return tuple(dict.fromkeys(image_ids))
+
+
+def _extract_download_statuses(summary: Any) -> tuple[str, ...]:
+    results = getattr(summary, "results", None)
+    if not isinstance(results, (list, tuple)):
+        return ()
+
+    statuses: list[str] = []
+    for item in results:
+        status = getattr(item, "status", None)
+        if isinstance(status, str):
+            statuses.append(status)
+        elif isinstance(item, dict):
+            candidate = item.get("status")
+            if isinstance(candidate, str):
+                statuses.append(candidate)
+    return tuple(statuses)
+
+
+def _extract_download_errors(summary: Any) -> tuple[str, ...]:
+    results = getattr(summary, "results", None)
+    if not isinstance(results, (list, tuple)):
+        return ()
+
+    errors: list[str] = []
+    for item in results:
+        error = getattr(item, "error", None)
+        if isinstance(error, str) and error:
+            errors.append(error)
+        elif isinstance(item, dict):
+            candidate = item.get("error")
+            if isinstance(candidate, str) and candidate:
+                errors.append(candidate)
+    return tuple(errors)
+
+
+def _successful_download_count(summary: Any) -> int | None:
+    downloaded = getattr(summary, "downloaded", None)
+    if isinstance(downloaded, int):
+        skipped = getattr(summary, "skipped", None)
+        skipped_existing = 0
+        if isinstance(skipped, int):
+            # edown aggregates all skipped statuses; existing files are still usable outputs.
+            statuses = _extract_download_statuses(summary)
+            skipped_existing = sum(1 for status in statuses if status == "skipped_existing")
+        return downloaded + skipped_existing
+
+    statuses = _extract_download_statuses(summary)
+    if statuses:
+        return sum(1 for status in statuses if status in {"downloaded", "skipped_existing"})
+
+    return None
+
+
+def _raise_download_failure(request: AlphaEarthDownloadRequest, summary: Any) -> None:
+    statuses = _extract_download_statuses(summary)
+    errors = _extract_download_errors(summary)
+    lowered = " | ".join(errors).lower()
+
+    if statuses and all(status == "skipped_outside_aoi" for status in statuses):
+        raise NoCoverageError(
+            f"No AlphaEarth imagery intersected AOI '{request.aoi_label}' for year {request.year}."
+        )
+
+    hint = ""
+    if "disk quota exceeded" in lowered or "no space left on device" in lowered:
+        hint = (
+            f" Output root '{request.dataset_output_root}' ran out of writable space. "
+            "Use a smaller AOI or a filesystem with more free space."
+        )
+
+    if statuses:
+        raise DownloadFailedError(
+            "AlphaEarth download did not produce any usable rasters. "
+            f"Observed statuses: {sorted(set(statuses))}." + hint
+        )
+
+    raise DownloadFailedError(
+        "AlphaEarth download failed before usable rasters were produced." + hint
+    )
 
 
 def download_alphaearth_images(
@@ -153,6 +248,9 @@ def download_alphaearth_images(
         raise NoCoverageError(
             f"No AlphaEarth imagery intersected AOI '{request.aoi_label}' for year {request.year}."
         )
+    successful_count = _successful_download_count(summary)
+    if successful_count == 0:
+        _raise_download_failure(request, summary)
 
     manifest_value = getattr(summary, "manifest_path", None)
     manifest_path = Path(manifest_value) if manifest_value is not None else None
