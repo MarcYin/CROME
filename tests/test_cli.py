@@ -10,8 +10,8 @@ def test_cli_download_alphaearth_dry_run(capsys) -> None:
             "download-alphaearth",
             "--year",
             "2024",
-            "--tile-id",
-            "30UXD",
+            "--aoi-label",
+            "east-anglia",
             "--bbox",
             "-1.0",
             "51.0",
@@ -23,7 +23,7 @@ def test_cli_download_alphaearth_dry_run(capsys) -> None:
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["tile_id"] == "30UXD"
+    assert payload["aoi_label"] == "east-anglia"
     assert payload["bands"][0] == "A00"
     assert payload["bands"][-1] == "A63"
 
@@ -34,12 +34,13 @@ def test_cli_download_alphaearth_forwards_request(monkeypatch, capsys) -> None:
     def fake_download(request):
         captured["request"] = request
         return SimpleNamespace(
+            aoi_label=request.aoi_label,
             bands=request.bands,
             collection_id=request.collection_id,
             conditional_year=request.conditional_year,
             manifest_path=None,
             output_root=request.dataset_output_root,
-            tile_id=request.tile_id,
+            source_image_ids=(),
             year=request.year,
         )
 
@@ -50,8 +51,8 @@ def test_cli_download_alphaearth_forwards_request(monkeypatch, capsys) -> None:
             "download-alphaearth",
             "--year",
             "2024",
-            "--tile-id",
-            "30UXD",
+            "--aoi-label",
+            "east-anglia",
             "--bbox",
             "-1.0",
             "51.0",
@@ -61,5 +62,5 @@ def test_cli_download_alphaearth_forwards_request(monkeypatch, capsys) -> None:
     )
 
     assert exit_code == 0
-    assert captured["request"].tile_id == "30UXD"
+    assert captured["request"].aoi_label == "east-anglia"
     assert json.loads(capsys.readouterr().out)["year"] == 2024

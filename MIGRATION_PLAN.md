@@ -4,6 +4,12 @@
 
 Replace the current classification inputs based on Sentinel-2 monthly composites with annual AlphaEarth Foundations embeddings from `GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL`, while preserving the existing sample extraction, model training, and raster reclassification workflow as much as possible.
 
+Reference-label correction:
+
+- AlphaEarth should be used as the feature source on its native image grid.
+- CROME should be treated as a vector hexagon reference dataset rather than per-pixel truth.
+- The downstream training target is therefore a 10 m raster label surface derived by transferring or rasterizing those CROME polygons onto the AlphaEarth grid.
+
 Repository delivery goal:
 
 - turn this directory into a proper Python package and GitHub repository at `git@github.com:MarcYin/CROME.git`
@@ -198,15 +204,13 @@ Planned work:
 
 Open design choice:
 
-- The current pipeline is built around Sentinel-2 MGRS tile IDs.
-- The embedding collection is not obviously keyed by `MGRS_TILE`.
-- The migration needs a tile-footprint strategy:
-  - derive geographic bounds from the current tile list and download embeddings by bounds, or
-  - move to a new UK grid/footprint definition and adapt all downstream scripts accordingly.
+- Do not drive AlphaEarth acquisition from legacy Sentinel-2 MGRS tile IDs.
+- Use the native AlphaEarth images discovered for an AOI/year and keep their original image/tile identity in the download manifest.
+- Local run labels may still exist for naming outputs, but they are not dataset-native tile identifiers.
 
 Recommendation:
 
-- Preserve the current tile list if possible, but treat the spatial window as a geometry/bounds input rather than a dataset-native tile identifier.
+- Treat AlphaEarth acquisition as `AOI + year -> one or more native AlphaEarth images`, not `S2 tile + year -> one raster`.
 
 ### Phase 2: Change the sampled feature schema
 
@@ -218,6 +222,9 @@ Target schema:
 
 - Prefer a simpler embedding schema such as `band_values(feature, sample)` where `feature` is `A00` to `A63`.
 - Alternatively keep `band` as the dimension name, but remove the `month` dimension entirely.
+- Keep the reference-label path separate from the feature path:
+  - AlphaEarth provides per-pixel features
+  - CROME provides polygon or hexagon reference labels that must be transferred to the 10 m feature grid
 
 Planned edits:
 
@@ -342,14 +349,12 @@ Fastest next check:
 
 ### 2. Spatial indexing mismatch
 
-- Current code assumes Sentinel-2 MGRS tiles.
-- The embedding dataset is a global image collection with its own tiling, not obviously the same tile key.
+- Current code assumes Sentinel-2 MGRS tiles, but the AlphaEarth path should not.
+- The embedding dataset should be handled through native AlphaEarth images discovered for the target AOI/year.
 
 Fastest next check:
 
-- Inspect one embedding image over a known UK tile footprint and decide whether the pipeline should use:
-  - MGRS-derived bounds, or
-  - a new explicit tiling grid.
+- Inspect one embedding image over a known UK AOI and confirm the manifest preserves the native AlphaEarth image identities.
 
 ### 3. Feature datatype mismatch
 
@@ -372,7 +377,7 @@ Fastest next check:
 
 Fastest next check:
 
-- Validate `edown` against one AlphaEarth tile-year by:
+- Validate `edown` against one AlphaEarth AOI/year by:
   - searching the collection for a known AOI/year
   - downloading one image with bands `A00` to `A63`
   - confirming the output dtype, CRS, and band naming match downstream expectations
@@ -381,10 +386,13 @@ Fastest next check:
 
 - `sample_spectra.py` extracts `geometry.x` and `geometry.y`, which implies point-like geometries.
 - If the crop map contains polygons in some years, this logic may depend on prior preprocessing.
+- The corrected CROME target is polygon or hexagon vector data, not native per-pixel labels.
+- The migration therefore needs an explicit vector-to-raster label-transfer step before model training can be trusted.
 
 Fastest next check:
 
 - Inspect one crop map file schema and geometry type before changing the sampling logic.
+- Define how polygon overlaps, partial pixels, and outside-polygon nodata should be handled on the 10 m AlphaEarth grid.
 
 ### 6. Repository hygiene risk
 

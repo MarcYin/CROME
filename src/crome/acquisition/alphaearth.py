@@ -21,12 +21,13 @@ class NoCoverageError(LookupError):
 class AlphaEarthDownloadResult:
     """Small result surface for the first migration slice."""
 
+    aoi_label: str
     bands: tuple[str, ...]
     collection_id: str
     conditional_year: bool
     manifest_path: Path | None
     output_root: Path
-    tile_id: str
+    source_image_ids: tuple[str, ...]
     year: int
 
 
@@ -92,6 +93,36 @@ def _extract_image_count(summary: Any) -> int | None:
     return None
 
 
+def _extract_image_ids(summary: Any) -> tuple[str, ...]:
+    image_ids: list[str] = []
+
+    def append_candidate(value: Any) -> None:
+        if isinstance(value, str):
+            image_ids.append(value)
+            return
+        if isinstance(value, dict):
+            for key in ("image_id", "id", "ee_id"):
+                candidate = value.get(key)
+                if isinstance(candidate, str):
+                    image_ids.append(candidate)
+                    return
+            return
+        for attribute in ("image_id", "id", "ee_id"):
+            candidate = getattr(value, attribute, None)
+            if isinstance(candidate, str):
+                image_ids.append(candidate)
+                return
+
+    for attribute in ("source_image_ids", "image_ids", "images", "discovered_images", "downloaded_images"):
+        value = getattr(summary, attribute, None)
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                append_candidate(item)
+
+    # Preserve order while removing duplicates.
+    return tuple(dict.fromkeys(image_ids))
+
+
 def download_alphaearth_images(
     request: AlphaEarthDownloadRequest,
     edown_module: Any | None = None,
@@ -105,19 +136,20 @@ def download_alphaearth_images(
     image_count = _extract_image_count(summary)
     if image_count == 0:
         raise NoCoverageError(
-            f"No AlphaEarth imagery intersected tile '{request.tile_id}' for year {request.year}."
+            f"No AlphaEarth imagery intersected AOI '{request.aoi_label}' for year {request.year}."
         )
 
     manifest_value = getattr(summary, "manifest_path", None)
     manifest_path = Path(manifest_value) if manifest_value is not None else None
 
     return AlphaEarthDownloadResult(
+        aoi_label=request.aoi_label or "aoi",
         bands=request.bands,
         collection_id=request.collection_id,
         conditional_year=request.conditional_year,
         manifest_path=manifest_path,
         output_root=request.dataset_output_root,
-        tile_id=request.tile_id or "aoi",
+        source_image_ids=_extract_image_ids(summary),
         year=request.year,
     )
 
@@ -126,10 +158,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Download AlphaEarth annual embeddings.")
     parser.add_argument("--year", required=True, type=int, help="Target annual layer year.")
     parser.add_argument(
-        "--tile-id",
+        "--aoi-label",
+        dest="aoi_label",
         default=None,
-        help="Optional AOI label used only in output naming for this first slice.",
+        help="Optional run label used only in local naming. This is not an AlphaEarth tile identifier.",
     )
+    parser.add_argument("--tile-id", dest="aoi_label", help=argparse.SUPPRESS)
     parser.add_argument(
         "--output-root",
         default="data/alphaearth",
@@ -162,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     request = AlphaEarthDownloadRequest(
         year=args.year,
         output_root=args.output_root,
-        tile_id=args.tile_id,
+        aoi_label=args.aoi_label,
         bbox=tuple(args.bbox) if args.bbox is not None else None,
         geojson=args.geojson,
     )
@@ -180,12 +214,13 @@ def main(argv: list[str] | None = None) -> int:
 
     result = download_alphaearth_images(request)
     payload = {
+        "aoi_label": result.aoi_label,
         "bands": list(result.bands),
         "collection_id": result.collection_id,
         "conditional_year": result.conditional_year,
         "manifest_path": str(result.manifest_path) if result.manifest_path else None,
         "output_root": str(result.output_root),
-        "tile_id": result.tile_id,
+        "source_image_ids": list(result.source_image_ids),
         "year": result.year,
     }
     print(json.dumps(payload, indent=2, sort_keys=True))

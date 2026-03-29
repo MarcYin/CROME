@@ -31,7 +31,7 @@ def test_build_download_config_uses_canonical_alphaearth_request() -> None:
     request = AlphaEarthDownloadRequest(
         year=2024,
         output_root="data/alphaearth",
-        tile_id="30UXD",
+        aoi_label="east-anglia",
         bbox=(-1.0, 51.0, 0.0, 52.0),
     )
 
@@ -40,7 +40,9 @@ def test_build_download_config_uses_canonical_alphaearth_request() -> None:
     assert config.start_date == "2024-01-01"
     assert config.end_date == "2025-01-01"
     assert config.aoi == ("bbox", (-1.0, 51.0, 0.0, 52.0))
-    assert config.output_root == Path("data/alphaearth/AEF_30UXD_annual_embedding_2024")
+    assert config.output_root == Path(
+        "data/alphaearth/raw/alphaearth/AEF_east-anglia_annual_embedding_2024"
+    )
 
 
 def test_download_alphaearth_images_wraps_summary() -> None:
@@ -49,16 +51,23 @@ def test_download_alphaearth_images_wraps_summary() -> None:
         DownloadConfig=FakeDownloadConfig,
         download_images=lambda config: SimpleNamespace(
             downloaded_images=1,
+            discovered_images=["GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL/test-image-1"],
             manifest_path=Path(config.output_root) / "manifest.json",
         ),
     )
     request = AlphaEarthDownloadRequest(
         year=2024,
         output_root="data/alphaearth",
-        tile_id="30UXD",
+        aoi_label="east-anglia",
         bbox=(-1.0, 51.0, 0.0, 52.0),
     )
 
     result = download_alphaearth_images(request, fake_module)
-    assert result.output_root == Path("data/alphaearth/AEF_30UXD_annual_embedding_2024")
-    assert result.manifest_path == Path("data/alphaearth/AEF_30UXD_annual_embedding_2024/manifest.json")
+    assert result.aoi_label == "east-anglia"
+    assert result.output_root == Path(
+        "data/alphaearth/raw/alphaearth/AEF_east-anglia_annual_embedding_2024"
+    )
+    assert result.source_image_ids == ("GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL/test-image-1",)
+    assert result.manifest_path == Path(
+        "data/alphaearth/raw/alphaearth/AEF_east-anglia_annual_embedding_2024/manifest.json"
+    )

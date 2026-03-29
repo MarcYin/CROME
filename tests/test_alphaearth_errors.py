@@ -17,7 +17,7 @@ def test_alphaearth_request_requires_exactly_one_aoi_input() -> None:
         AlphaEarthDownloadRequest(
             year=2024,
             output_root="data/alphaearth",
-            tile_id="30UXD",
+            aoi_label="england-se",
         )
 
 
@@ -27,4 +27,25 @@ def test_alphaearth_request_rejects_invalid_bbox_order() -> None:
             year=2024,
             output_root="data/alphaearth",
             bbox=(1.0, 51.0, 0.0, 52.0),
+        )
+
+
+def test_training_spec_requires_matching_aoi_labels() -> None:
+    alphaearth = AlphaEarthDownloadRequest(
+        year=2024,
+        output_root="data/alphaearth",
+        aoi_label="east-anglia",
+        bbox=(0.0, 52.0, 1.0, 53.0),
+    )
+
+    with pytest.raises(ValueError, match="AOI label"):
+        from crome.config import AlphaEarthTrainingSpec, CromeReferenceConfig
+
+        AlphaEarthTrainingSpec(
+            alphaearth=alphaearth,
+            reference=CromeReferenceConfig(
+                source_path="crome_2024.fgb",
+                year=2024,
+                aoi_label="england-ne",
+            ),
         )
