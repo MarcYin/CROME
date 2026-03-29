@@ -106,6 +106,7 @@ class CromeReferenceConfig:
     target_resolution_m: float = ALPHAEARTH_TARGET_RESOLUTION_M
     target_crs: str | None = None
     reference_name: str = "crome_hex"
+    all_touched: bool = False
 
     def __post_init__(self) -> None:
         if self.year < ALPHAEARTH_FIRST_YEAR or self.year > ALPHAEARTH_LAST_ALLOWED_YEAR:
@@ -126,6 +127,7 @@ class CromeReferenceConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "all_touched": self.all_touched,
             "aoi_label": self.aoi_label,
             "geometry_column": self.geometry_column,
             "label_column": self.label_column,

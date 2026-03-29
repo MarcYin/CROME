@@ -13,7 +13,14 @@ authors = [
   { name = "Marc Yin", email = "marcollinbobo@gmail.com" },
 ]
 keywords = ["crop-mapping", "earth-engine", "alphaearth", "geospatial"]
-dependencies = []
+dependencies = [
+  "geopandas>=1.0",
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "rasterio>=1.3",
+  "scikit-learn>=1.5",
+  "shapely>=2.0",
+]
 
 [project.optional-dependencies]
 ee = [
