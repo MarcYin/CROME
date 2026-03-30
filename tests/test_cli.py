@@ -44,6 +44,16 @@ def _write_reference_geojson(path: Path) -> None:
     gdf.to_file(path, driver="GeoJSON")
 
 
+def _write_reference_gpkg(path: Path) -> None:
+    left = Polygon([(0, 0), (2, 0), (2, 4), (0, 4)])
+    right = Polygon([(2, 0), (4, 0), (4, 4), (2, 4)])
+    gdf = gpd.GeoDataFrame(
+        {"lucode": ["wheat", "barley"], "geometry": [left, right]},
+        crs="EPSG:3857",
+    )
+    gdf.to_file(path, driver="GPKG")
+
+
 def _write_manifest(path: Path, rasters: list[tuple[str, Path]]) -> None:
     output_root = path.parent.parent if path.parent.name == "manifests" else path.parent
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -134,6 +144,34 @@ def test_cli_download_alphaearth_forwards_request(monkeypatch, capsys) -> None:
     assert exit_code == 0
     assert captured["request"].aoi_label == "east-anglia"
     assert json.loads(capsys.readouterr().out)["year"] == 2024
+
+
+def test_cli_download_crome_dry_run(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        cli.crome,
+        "resolve_crome_landing_page",
+        lambda request: SimpleNamespace(
+            dataset_id="complete",
+            title="Crop Map of England (CROME) 2017 - Complete",
+            url="https://environment.data.gov.uk/dataset/complete",
+            variant="Complete",
+            variant_label="complete",
+        ),
+    )
+    monkeypatch.setattr(
+        cli.crome,
+        "extract_crome_gpkg_zip_url",
+        lambda landing_page, timeout_s=30.0: (
+            "https://example.test/Crop_Map_of_England_CROME_2017_Complete.gpkg.zip"
+        ),
+    )
+
+    exit_code = cli.main(["download-crome", "--year", "2017", "--dry-run"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dataset_id"] == "complete"
+    assert payload["archive_url"].endswith(".gpkg.zip")
 
 
 def test_cli_requires_subcommand() -> None:
@@ -365,6 +403,70 @@ def test_cli_download_run_baseline(monkeypatch, tmp_path: Path, capsys) -> None:
     assert payload["download"]["manifest_path"] == str(manifest_path)
     assert payload["pipeline"]["feature_count"] == 1
     assert Path(payload["pipeline"]["pipeline_manifest_path"]).exists()
+
+
+def test_cli_download_run_baseline_auto_downloads_crome(monkeypatch, tmp_path: Path, capsys) -> None:
+    feature_dir = tmp_path / "raw"
+    feature_dir.mkdir()
+    feature_raster = feature_dir / "alphaearth_downloaded.tif"
+    manifest_path = feature_dir / "manifests" / "run.json"
+    extracted_reference = tmp_path / "raw" / "crome" / "CROME_2024_national" / "extracted" / "crome_2024.gpkg"
+    output_root = tmp_path / "outputs"
+    _write_feature_raster(feature_raster)
+    extracted_reference.parent.mkdir(parents=True, exist_ok=True)
+    _write_reference_gpkg(extracted_reference)
+    _write_manifest(manifest_path, [("IMAGE_DOWNLOADED", feature_raster)])
+
+    def fake_alphaearth_download(request):
+        return SimpleNamespace(
+            aoi_label=request.aoi_label,
+            bands=request.bands,
+            collection_id=request.collection_id,
+            conditional_year=request.conditional_year,
+            manifest_path=manifest_path,
+            output_root=feature_dir,
+            source_image_ids=("IMAGE_DOWNLOADED",),
+            year=request.year,
+        )
+
+    def fake_crome_download(request):
+        return SimpleNamespace(
+            archive_path=tmp_path / "raw" / "crome" / "archive.zip",
+            archive_url="https://example.test/Crop_Map_of_England_CROME_2024.gpkg.zip",
+            dataset_id="2024",
+            extracted_path=extracted_reference,
+            landing_page_url="https://environment.data.gov.uk/dataset/2024",
+            manifest_path=tmp_path / "raw" / "crome" / "manifest.json",
+            output_root=extracted_reference.parent.parent,
+            title="Crop Map of England (CROME) 2024",
+            variant=None,
+            year=request.year,
+        )
+
+    monkeypatch.setattr(cli.workflow, "download_alphaearth_images", fake_alphaearth_download)
+    monkeypatch.setattr(cli.workflow, "download_crome_reference", fake_crome_download)
+
+    exit_code = cli.main(
+        [
+            "download-run-baseline",
+            "--year",
+            "2024",
+            "--aoi-label",
+            "east-anglia",
+            "--bbox",
+            "-1.0",
+            "51.0",
+            "0.0",
+            "52.0",
+            "--output-root",
+            str(output_root),
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reference_download"]["dataset_id"] == "2024"
+    assert payload["pipeline"]["feature_count"] == 1
 
 
 def test_python_module_cli_executes_main(tmp_path: Path) -> None:

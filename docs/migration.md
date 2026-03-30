@@ -11,6 +11,8 @@
 - pure reference-label contracts for CROME hexagon inputs
 - native AlphaEarth raster discovery from directories or manifests
 - one-command download-to-baseline orchestration on top of the `edown` acquisition path
+- live CROME reference discovery from DEFRA DSP search results and landing-page file manifests
+- local download and extraction of the national CROME `.gpkg.zip` archive, including legacy `- Complete` years
 - rasterization of CROME vectors onto the AlphaEarth 10 m grid
 - training-table creation and aggregation from aligned raster pairs with feature/source lineage
 - baseline random-forest training and per-raster prediction on the new package boundary

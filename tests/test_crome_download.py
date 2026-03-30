@@ -1,0 +1,191 @@
+import json
+from pathlib import Path
+import zipfile
+
+import pytest
+
+from crome.acquisition.crome import (
+    CromeDownloadError,
+    HttpResponse,
+    _build_search_url,
+    download_crome_reference,
+    extract_crome_gpkg_zip_url,
+    resolve_crome_landing_page,
+)
+from crome.config import CromeDownloadRequest
+
+
+def _next_data_html(page_props: dict) -> str:
+    payload = {
+        "buildId": "test-build",
+        "gssp": True,
+        "isFallback": False,
+        "page": "/test",
+        "props": {"pageProps": page_props},
+        "query": {},
+        "runtimeConfig": {},
+        "scriptLoader": [],
+    }
+    return (
+        "<html><body><script id=\"__NEXT_DATA__\" type=\"application/json\">"
+        + json.dumps(payload)
+        + "</script></body></html>"
+    )
+
+
+def _search_html(*datasets: dict[str, object], count: int | None = None) -> str:
+    return _next_data_html(
+        {
+            "allowEmptySearch": False,
+            "count": len(datasets) if count is None else count,
+            "datasets": list(datasets),
+            "error": None,
+            "query": {},
+        }
+    )
+
+
+def _dataset_html(title: str, files: list[dict[str, str]], *, file_dataset_id: str | None = None) -> str:
+    dataset = {"title": title}
+    if file_dataset_id is not None:
+        dataset["dataSet"] = {"id": file_dataset_id}
+    return _next_data_html(
+        {
+            "dataset": dataset,
+            "error": None,
+            "files": files,
+            "query": {},
+        }
+    )
+
+
+def test_resolve_crome_landing_page_prefers_plain_year_page_for_modern_releases() -> None:
+    request = CromeDownloadRequest(year=2024, output_root="outputs")
+    search_url = _build_search_url(request, page=1)
+    http_map = {
+        search_url: _search_html(
+            {"id": "2024", "title": "Crop Map of England (CROME) 2024"},
+            {"id": "2023", "title": "Crop Map of England (CROME) 2023"},
+        )
+    }
+
+    landing_page = resolve_crome_landing_page(request, http_get=lambda url, _timeout: HttpResponse(body=http_map[url].encode("utf-8"), status_code=200, url=url))
+
+    assert landing_page.dataset_id == "2024"
+    assert landing_page.title == "Crop Map of England (CROME) 2024"
+    assert landing_page.complete_variant is False
+
+
+def test_resolve_crome_landing_page_prefers_complete_variant_when_present() -> None:
+    request = CromeDownloadRequest(year=2017, output_root="outputs")
+    search_url = _build_search_url(request, page=1)
+    http_map = {
+        search_url: _search_html(
+            {"id": "midlands", "title": "Crop Map of England (CROME) 2017 - Midlands"},
+            {"id": "complete", "title": "Crop Map of England (CROME) 2017 - Complete"},
+            {"id": "south-east", "title": "Crop Map of England (CROME) 2017 - South East"},
+        )
+    }
+
+    landing_page = resolve_crome_landing_page(request, http_get=lambda url, _timeout: HttpResponse(body=http_map[url].encode("utf-8"), status_code=200, url=url))
+
+    assert landing_page.dataset_id == "complete"
+    assert landing_page.complete_variant is True
+
+
+def test_resolve_crome_landing_page_rejects_regional_only_results() -> None:
+    request = CromeDownloadRequest(year=2017, output_root="outputs")
+    search_url = _build_search_url(request, page=1)
+    http_map = {
+        search_url: _search_html(
+            {"id": "midlands", "title": "Crop Map of England (CROME) 2017 - Midlands"},
+            {"id": "north", "title": "Crop Map of England (CROME) 2017 - North"},
+        )
+    }
+
+    with pytest.raises(CromeDownloadError, match="regional CROME datasets"):
+        resolve_crome_landing_page(
+            request,
+            http_get=lambda url, _timeout: HttpResponse(
+                body=http_map[url].encode("utf-8"),
+                status_code=200,
+                url=url,
+            ),
+        )
+
+
+def test_extract_crome_gpkg_zip_url_selects_gpkg_zip_not_gdb_or_geojson() -> None:
+    request = CromeDownloadRequest(year=2024, output_root="outputs")
+    search_url = _build_search_url(request, page=1)
+    dataset_url = "https://environment.data.gov.uk/dataset/2024"
+    file_dataset_id = "public-2024"
+    http_map = {
+        search_url: _search_html({"id": "2024", "title": "Crop Map of England (CROME) 2024"}),
+        dataset_url: _dataset_html(
+            "Crop Map of England (CROME) 2024",
+            [
+                {"name": "Crop_Map_of_England_CROME_2024.gdb.zip", "fileURI": "https://example.test/2024.gdb.zip"},
+                {"name": "Crop_Map_of_England_CROME_2024.geojson.zip", "fileURI": "https://example.test/2024.geojson.zip"},
+                {"name": "Crop_Map_of_England_CROME_2024.gpkg.zip", "fileURI": "https://example.test/2024.gpkg.zip"},
+            ],
+            file_dataset_id=file_dataset_id,
+        ),
+    }
+
+    def http_get(url: str, _timeout: float) -> HttpResponse:
+        return HttpResponse(body=http_map[url].encode("utf-8"), status_code=200, url=url)
+
+    landing_page = resolve_crome_landing_page(request, http_get=http_get)
+    download_url = extract_crome_gpkg_zip_url(landing_page, http_get=http_get)
+
+    assert download_url == (
+        "https://environment.data.gov.uk/file-management-open/data-sets/"
+        "public-2024/files/Crop_Map_of_England_CROME_2024.gpkg.zip"
+    )
+
+
+def test_download_crome_reference_writes_expected_archive_and_gpkg(tmp_path: Path) -> None:
+    request = CromeDownloadRequest(year=2017, output_root=tmp_path)
+    search_url = _build_search_url(request, page=1)
+    dataset_url = "https://environment.data.gov.uk/dataset/complete"
+    http_map = {
+        search_url: _search_html(
+            {"id": "complete", "title": "Crop Map of England (CROME) 2017 - Complete"}
+        ),
+        dataset_url: _dataset_html(
+            "Crop Map of England (CROME) 2017 - Complete",
+            [
+                {
+                    "name": "Crop_Map_of_England_CROME_2017_Complete.gpkg.zip",
+                    "fileURI": "https://example.test/Crop_Map_of_England_CROME_2017_Complete.gpkg.zip",
+                }
+            ],
+            file_dataset_id="public-2017",
+        ),
+    }
+
+    def http_get(url: str, _timeout: float) -> HttpResponse:
+        return HttpResponse(body=http_map[url].encode("utf-8"), status_code=200, url=url)
+
+    def download_file(url: str, destination: Path, _timeout: float) -> None:
+        assert url == (
+            "https://environment.data.gov.uk/file-management-open/data-sets/"
+            "public-2017/files/Crop_Map_of_England_CROME_2017_Complete.gpkg.zip"
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(destination, "w") as archive:
+            archive.writestr("Crop_Map_of_England_CROME_2017_Complete.gpkg", b"gpkg-bytes")
+
+    result = download_crome_reference(request, http_get=http_get, download_file=download_file)
+
+    assert result.archive_path.exists()
+    assert result.extracted_path == (
+        tmp_path
+        / "raw"
+        / "crome"
+        / "CROME_2017_complete"
+        / "extracted"
+        / "Crop_Map_of_England_CROME_2017_Complete.gpkg"
+    )
+    assert result.extracted_path.exists()
+    assert json.loads(result.manifest_path.read_text(encoding="utf-8"))["dataset_id"] == "complete"

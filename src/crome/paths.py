@@ -35,6 +35,44 @@ def alphaearth_output_root(base_output_root: Path | str, aoi_label: str | None, 
     return Path(base_output_root) / "raw" / "alphaearth" / alphaearth_run_name(aoi_label, year)
 
 
+def crome_run_name(year: int, variant_label: str | None = None) -> str:
+    """Return the stable run directory name for one CROME reference acquisition."""
+
+    suffix = sanitize_label(variant_label, default="national")
+    return f"CROME_{year}_{suffix}"
+
+
+def crome_download_root(
+    base_output_root: Path | str,
+    year: int,
+    variant_label: str | None = None,
+) -> Path:
+    """Return the raw CROME download directory for one year/variant."""
+
+    return Path(base_output_root) / "raw" / "crome" / crome_run_name(year, variant_label)
+
+
+def crome_archive_path(
+    base_output_root: Path | str,
+    year: int,
+    filename: str,
+    variant_label: str | None = None,
+) -> Path:
+    """Return the archive path for one downloaded CROME file."""
+
+    return crome_download_root(base_output_root, year, variant_label) / "archive" / filename
+
+
+def crome_extract_root(
+    base_output_root: Path | str,
+    year: int,
+    variant_label: str | None = None,
+) -> Path:
+    """Return the extraction directory for one downloaded CROME archive."""
+
+    return crome_download_root(base_output_root, year, variant_label) / "extracted"
+
+
 def reference_run_name(
     aoi_label: str | None,
     year: int,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from crome.acquisition import alphaearth
+from crome.acquisition import alphaearth, crome
 from crome import labeling, pipeline, predict, training, workflow
 
 
@@ -19,6 +19,14 @@ def build_parser() -> argparse.ArgumentParser:
         "download-alphaearth",
         help=alphaearth_help,
         parents=[alphaearth_parser],
+        add_help=False,
+    )
+    crome_parser = crome.build_parser()
+    crome_help = crome_parser.description or "Download a CROME GeoPackage reference."
+    subparsers.add_parser(
+        "download-crome",
+        help=crome_help,
+        parents=[crome_parser],
         add_help=False,
     )
     rasterize_parser = labeling.build_parser()
@@ -72,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
     forwarded = argv[1:] if argv is not None else sys.argv[2:]
     if args.command == "download-alphaearth":
         return alphaearth.main(forwarded)
+    if args.command == "download-crome":
+        return crome.main(forwarded)
     if args.command == "rasterize-reference":
         return labeling.main(forwarded)
     if args.command == "build-training-table":

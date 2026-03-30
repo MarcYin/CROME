@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from crome.config import AlphaEarthDownloadRequest, AlphaEarthTrainingSpec, CromeReferenceConfig
+from crome.config import (
+    AlphaEarthDownloadRequest,
+    AlphaEarthTrainingSpec,
+    CromeDownloadRequest,
+    CromeReferenceConfig,
+)
 
 
 def test_alphaearth_request_builds_stable_paths_for_bbox() -> None:
@@ -49,3 +54,12 @@ def test_training_spec_tracks_crome_hexagon_reference_outputs() -> None:
     )
     assert spec.training_output_root == Path("data/alphaearth/training/TRAIN_east-anglia_2024")
     assert spec.prediction_output_root == Path("data/alphaearth/prediction/PRED_east-anglia_2024")
+
+
+def test_crome_download_request_builds_exact_title_query() -> None:
+    request = CromeDownloadRequest(year=2017, output_root="data/alphaearth")
+
+    assert request.query == "Crop Map of England (CROME) 2017"
+    assert request.dataset_output_root == Path(
+        "data/alphaearth/raw/crome/CROME_2017_complete"
+    )

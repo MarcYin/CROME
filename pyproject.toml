@@ -39,6 +39,7 @@ docs = [
 [project.scripts]
 crome = "crome.cli:main"
 crome-alphaearth-download = "crome.acquisition.alphaearth:main"
+crome-crome-download = "crome.acquisition.crome:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

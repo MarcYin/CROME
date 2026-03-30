@@ -16,6 +16,7 @@ from .constants import (
 )
 from .paths import (
     alphaearth_output_root,
+    crome_download_root,
     prediction_output_root,
     reference_output_root,
     sanitize_label,
@@ -141,6 +142,57 @@ class CromeReferenceConfig:
             "source_path": str(self.source_path),
             "target_crs": self.target_crs,
             "target_resolution_m": self.target_resolution_m,
+            "year": self.year,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CromeDownloadRequest:
+    """Pure request object for one CROME reference acquisition."""
+
+    year: int
+    output_root: Path | str
+    prefer_complete: bool = True
+    extract: bool = True
+    force: bool = False
+    query: str | None = None
+    search_base_url: str = "https://environment.data.gov.uk/searchresults"
+    timeout_s: float = 30.0
+    pagesize: int = 50
+
+    def __post_init__(self) -> None:
+        if self.year < ALPHAEARTH_FIRST_YEAR or self.year > ALPHAEARTH_LAST_ALLOWED_YEAR:
+            raise ValueError(
+                f"CROME download year must be between {ALPHAEARTH_FIRST_YEAR} and "
+                f"{ALPHAEARTH_LAST_ALLOWED_YEAR}."
+            )
+        if self.timeout_s <= 0:
+            raise ValueError("timeout_s must be positive.")
+        if self.pagesize <= 0:
+            raise ValueError("pagesize must be positive.")
+
+        object.__setattr__(self, "output_root", Path(self.output_root))
+        object.__setattr__(
+            self,
+            "query",
+            (self.query or f"Crop Map of England (CROME) {self.year}").strip(),
+        )
+
+    @property
+    def dataset_output_root(self) -> Path:
+        variant_label = "complete" if self.prefer_complete else "national"
+        return crome_download_root(self.output_root, self.year, variant_label=variant_label)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "extract": self.extract,
+            "force": self.force,
+            "output_root": str(self.output_root),
+            "pagesize": self.pagesize,
+            "prefer_complete": self.prefer_complete,
+            "query": self.query,
+            "search_base_url": self.search_base_url,
+            "timeout_s": self.timeout_s,
             "year": self.year,
         }
 
