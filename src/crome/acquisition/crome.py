@@ -14,7 +14,14 @@ from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from crome.config import CromeDownloadRequest
-from crome.paths import crome_archive_path, crome_download_root, crome_extract_root, sanitize_label
+from crome.paths import (
+    OUTPUT_ROOT_ENV_VAR,
+    crome_archive_path,
+    crome_download_root,
+    crome_extract_root,
+    default_output_root,
+    sanitize_label,
+)
 
 _NEXT_DATA_PATTERN = re.compile(
     r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
@@ -404,8 +411,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--year", required=True, type=int, help="Target CROME year.")
     parser.add_argument(
         "--output-root",
-        default="data/alphaearth",
-        help="Base directory for downloaded CROME archives and extracted GeoPackages.",
+        default=default_output_root(),
+        help=(
+            "Base directory for downloaded CROME archives and extracted GeoPackages. "
+            f"Defaults to ${OUTPUT_ROOT_ENV_VAR} when set, otherwise data/alphaearth."
+        ),
     )
     parser.add_argument(
         "--query",

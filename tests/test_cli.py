@@ -174,6 +174,60 @@ def test_cli_download_crome_dry_run(monkeypatch, capsys) -> None:
     assert payload["archive_url"].endswith(".gpkg.zip")
 
 
+def test_cli_download_run_baseline_uses_env_output_root(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("CROME_DATA_ROOT", "/gws/ssde/j25a/nceo_isp/public/CROME")
+
+    exit_code = cli.main(
+        [
+            "download-run-baseline",
+            "--year",
+            "2024",
+            "--aoi-label",
+            "east-anglia",
+            "--bbox",
+            "-1.0",
+            "51.0",
+            "0.0",
+            "52.0",
+            "--dry-run",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["download"]["output_root"] == "/gws/ssde/j25a/nceo_isp/public/CROME"
+    assert payload["reference_download"]["output_root"] == "/gws/ssde/j25a/nceo_isp/public/CROME"
+    assert payload["pipeline"]["output_root"] == "/gws/ssde/j25a/nceo_isp/public/CROME"
+
+
+def test_cli_output_root_flag_overrides_env_default(monkeypatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.setenv("CROME_DATA_ROOT", "/gws/ssde/j25a/nceo_isp/public/CROME")
+
+    exit_code = cli.main(
+        [
+            "download-run-baseline",
+            "--year",
+            "2024",
+            "--aoi-label",
+            "east-anglia",
+            "--bbox",
+            "-1.0",
+            "51.0",
+            "0.0",
+            "52.0",
+            "--output-root",
+            str(tmp_path / "override"),
+            "--dry-run",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["download"]["output_root"] == str(tmp_path / "override")
+    assert payload["reference_download"]["output_root"] == str(tmp_path / "override")
+    assert payload["pipeline"]["output_root"] == str(tmp_path / "override")
+
+
 def test_cli_requires_subcommand() -> None:
     try:
         cli.main([])

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from crome.config import AlphaEarthDownloadRequest
+from crome.paths import OUTPUT_ROOT_ENV_VAR, default_output_root
 
 
 class NoCoverageError(LookupError):
@@ -279,8 +280,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tile-id", dest="aoi_label", help=argparse.SUPPRESS)
     parser.add_argument(
         "--output-root",
-        default="data/alphaearth",
-        help="Base directory for AlphaEarth outputs.",
+        default=default_output_root(),
+        help=(
+            f"Base directory for AlphaEarth outputs. Defaults to ${OUTPUT_ROOT_ENV_VAR} "
+            "when set, otherwise data/alphaearth."
+        ),
     )
     parser.add_argument(
         "--bbox",

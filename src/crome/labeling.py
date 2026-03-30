@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
+import pandas as pd
+import pyogrio
 import rasterio
 from rasterio.features import rasterize
+from rasterio.warp import transform_bounds
 from shapely.geometry import box
 
 from .config import AlphaEarthDownloadRequest, AlphaEarthTrainingSpec, CromeReferenceConfig
 from .features import read_feature_raster_spec
-from .reference import validate_reference_columns
+from .paths import OUTPUT_ROOT_ENV_VAR, default_output_root
 from .runtime import ensure_proj_data_env
 
 
@@ -31,6 +35,164 @@ class RasterizedReferenceResult:
 
 class NoReferenceCoverageError(ValueError):
     """Raised when a feature raster has no usable CROME coverage."""
+
+
+def _reference_layer_name(reference_path: Path | str) -> str | None:
+    ensure_proj_data_env()
+    layers = pyogrio.list_layers(reference_path)
+    if len(layers) == 0:
+        return None
+    first = layers[0]
+    return str(first[0])
+
+
+def _reference_layer_names(reference_path: Path | str) -> tuple[str, ...]:
+    ensure_proj_data_env()
+    return tuple(str(item[0]) for item in pyogrio.list_layers(reference_path))
+
+
+def _reference_info(reference_path: Path | str, *, layer: str | None = None) -> dict[str, object]:
+    ensure_proj_data_env()
+    return pyogrio.read_info(reference_path, layer=layer)
+
+
+def _reference_bbox_in_source_crs(
+    reference_path: Path | str,
+    feature_bounds: tuple[float, float, float, float],
+    feature_crs: str | None,
+) -> tuple[float, float, float, float] | None:
+    if feature_crs is None:
+        return None
+
+    info = _reference_info(reference_path, layer=_reference_layer_name(reference_path))
+    source_crs = info.get("crs")
+    if not isinstance(source_crs, str) or not source_crs:
+        return None
+
+    try:
+        return transform_bounds(feature_crs, source_crs, *feature_bounds, densify_pts=21)
+    except Exception:
+        return None
+
+
+def _read_reference_geometries(
+    reference_path: Path | str,
+    *,
+    label_column: str,
+    geometry_column: str,
+    bbox: tuple[float, float, float, float] | None = None,
+) -> gpd.GeoDataFrame:
+    ensure_proj_data_env()
+    frames: list[gpd.GeoDataFrame] = []
+
+    for layer in _reference_layer_names(reference_path):
+        if bbox is not None:
+            info = _reference_info(reference_path, layer=layer)
+            total_bounds = info.get("total_bounds")
+            if hasattr(total_bounds, "__len__") and len(total_bounds) == 4:
+                if (
+                    total_bounds[2] < bbox[0]
+                    or total_bounds[0] > bbox[2]
+                    or total_bounds[3] < bbox[1]
+                    or total_bounds[1] > bbox[3]
+                ):
+                    continue
+
+        read_kwargs: dict[str, object] = {"layer": layer, "columns": [label_column]}
+        if bbox is not None:
+            read_kwargs["bbox"] = bbox
+
+        gdf = pyogrio.read_dataframe(reference_path, **read_kwargs)
+        if gdf.empty:
+            continue
+        if label_column not in gdf.columns:
+            raise ValueError(f"Reference data is missing required column: {label_column}")
+        if gdf.geometry is None:
+            raise ValueError("Reference data is missing geometry.")
+
+        source_geometry_column = (
+            geometry_column if geometry_column in gdf.columns else gdf.geometry.name
+        )
+        if source_geometry_column is None:
+            raise ValueError("Reference data is missing geometry.")
+
+        frames.append(
+            gdf[[label_column, source_geometry_column]].rename(
+                columns={source_geometry_column: "geometry"}
+            )
+        )
+
+    if not frames:
+        info = _reference_info(reference_path, layer=_reference_layer_name(reference_path))
+        source_crs = info.get("crs")
+        return gpd.GeoDataFrame({label_column: []}, geometry=[], crs=source_crs)
+
+    concatenated = pd.concat(frames, ignore_index=True)
+    return gpd.GeoDataFrame(concatenated, geometry="geometry", crs=frames[0].crs)
+
+
+def _quote_sqlite_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _load_gpkg_distinct_labels(
+    reference_path: Path | str,
+    label_column: str,
+) -> tuple[str, ...]:
+    layers = _reference_layer_names(reference_path)
+    if not layers:
+        raise ValueError(f"Could not determine a layer name for {reference_path}.")
+    statements = [
+        (
+            f"SELECT DISTINCT {_quote_sqlite_identifier(label_column)} AS label "
+            f"FROM {_quote_sqlite_identifier(layer)} "
+            f"WHERE {_quote_sqlite_identifier(label_column)} IS NOT NULL"
+        )
+        for layer in layers
+    ]
+    query = " UNION ".join(statements) + " ORDER BY label"
+    with sqlite3.connect(reference_path) as connection:
+        rows = connection.execute(query).fetchall()
+    labels = tuple(str(row[0]) for row in rows if row[0] is not None)
+    if not labels:
+        raise ValueError("Reference source does not expose any non-null labels.")
+    return labels
+
+
+def _load_distinct_labels_from_vector(
+    reference_path: Path | str,
+    label_column: str,
+    *,
+    bbox: tuple[float, float, float, float] | None = None,
+) -> tuple[str, ...]:
+    ensure_proj_data_env()
+    labels: set[str] = set()
+    for layer in _reference_layer_names(reference_path):
+        if bbox is not None:
+            info = _reference_info(reference_path, layer=layer)
+            total_bounds = info.get("total_bounds")
+            if hasattr(total_bounds, "__len__") and len(total_bounds) == 4:
+                if (
+                    total_bounds[2] < bbox[0]
+                    or total_bounds[0] > bbox[2]
+                    or total_bounds[3] < bbox[1]
+                    or total_bounds[1] > bbox[3]
+                ):
+                    continue
+        table = pyogrio.read_dataframe(
+            reference_path,
+            layer=layer,
+            columns=[label_column],
+            read_geometry=False,
+            bbox=bbox,
+        )
+        if label_column not in table.columns:
+            raise ValueError(f"Reference data is missing required column: {label_column}")
+        labels.update(str(value) for value in table[label_column] if value is not None)
+    labels = tuple(sorted(labels))
+    if not labels:
+        raise ValueError("Reference source does not expose any non-null labels.")
+    return labels
 
 
 def _has_positive_area_overlaps(gdf: gpd.GeoDataFrame) -> bool:
@@ -60,9 +222,17 @@ def _load_reference_geometries(
     spec: AlphaEarthTrainingSpec,
 ) -> gpd.GeoDataFrame:
     feature_spec = read_feature_raster_spec(feature_raster_path)
-    ensure_proj_data_env()
-    gdf = gpd.read_file(spec.reference.source_path)
-    validate_reference_columns(gdf.columns, spec.reference.label_column, spec.reference.geometry_column)
+    read_bbox = _reference_bbox_in_source_crs(
+        spec.reference.source_path,
+        feature_spec.bounds,
+        feature_spec.crs,
+    )
+    gdf = _read_reference_geometries(
+        spec.reference.source_path,
+        label_column=spec.reference.label_column,
+        geometry_column=spec.reference.geometry_column,
+        bbox=read_bbox,
+    )
 
     if gdf.crs is None:
         if spec.reference.target_crs is None:
@@ -100,17 +270,44 @@ def _label_mapping(gdf: gpd.GeoDataFrame, label_column: str) -> tuple[dict[str, 
 def load_reference_label_mapping(
     reference_path: Path | str,
     label_column: str,
+    *,
+    bbox: tuple[float, float, float, float] | None = None,
 ) -> tuple[dict[str, int], tuple[str, ...]]:
     """Build one stable label mapping from the full CROME reference source."""
 
-    ensure_proj_data_env()
-    gdf = gpd.read_file(reference_path)
-    if label_column not in gdf.columns:
-        raise ValueError(f"Reference data is missing required column: {label_column}")
-    labels = tuple(sorted({str(value) for value in gdf[label_column] if value is not None}))
-    if not labels:
-        raise ValueError("Reference source does not expose any non-null labels.")
+    reference_path = Path(reference_path)
+    if reference_path.suffix.casefold() == ".gpkg" and bbox is None:
+        labels = _load_gpkg_distinct_labels(reference_path, label_column)
+    else:
+        labels = _load_distinct_labels_from_vector(reference_path, label_column, bbox=bbox)
     return {label: idx for idx, label in enumerate(labels)}, labels
+
+
+def reference_source_bbox_for_feature_rasters(
+    reference_path: Path | str,
+    feature_raster_paths: list[Path | str],
+) -> tuple[float, float, float, float] | None:
+    """Return one union bbox in the reference CRS covering all feature rasters."""
+
+    reference_bboxes: list[tuple[float, float, float, float]] = []
+    for feature_raster_path in feature_raster_paths:
+        feature_spec = read_feature_raster_spec(feature_raster_path)
+        bbox = _reference_bbox_in_source_crs(
+            reference_path,
+            feature_spec.bounds,
+            feature_spec.crs,
+        )
+        if bbox is not None:
+            reference_bboxes.append(bbox)
+
+    if not reference_bboxes:
+        return None
+
+    minx = min(bbox[0] for bbox in reference_bboxes)
+    miny = min(bbox[1] for bbox in reference_bboxes)
+    maxx = max(bbox[2] for bbox in reference_bboxes)
+    maxy = max(bbox[3] for bbox in reference_bboxes)
+    return (minx, miny, maxx, maxy)
 
 
 def rasterize_crome_reference(
@@ -207,7 +404,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference-path", required=True, help="Path to the CROME vector reference file.")
     parser.add_argument("--year", required=True, type=int, help="Reference year.")
     parser.add_argument("--aoi-label", default=None, help="AOI label used for output naming.")
-    parser.add_argument("--output-root", default="data/alphaearth", help="Base output directory.")
+    parser.add_argument(
+        "--output-root",
+        default=default_output_root(),
+        help=(
+            f"Base output directory. Defaults to ${OUTPUT_ROOT_ENV_VAR} when set, "
+            "otherwise data/alphaearth."
+        ),
+    )
     parser.add_argument("--label-column", default="lucode", help="Reference class column.")
     parser.add_argument("--geometry-column", default="geometry", help="Reference geometry column.")
     parser.add_argument(

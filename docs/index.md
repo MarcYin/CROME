@@ -34,6 +34,16 @@ If you do not pass `--reference-path`, the workflow now auto-downloads the natio
 When multiple native rasters are present, the batch pipeline keeps one global CROME label mapping across the run and prefers feature-level holdout over pixel-level holdout.
 `download-crome` resolves the DEFRA search results and landing-page `files` list, prefers the national `.gpkg.zip` asset for the requested year, and automatically falls back to `- Complete` nationwide releases for older years such as 2016 and 2017.
 
+To keep a user-specific shared data root without hardcoding it into the project, set:
+
+```bash
+export CROME_DATA_ROOT=/gws/ssde/j25a/nceo_isp/public/CROME
+```
+
+All CLI commands that accept `--output-root` use that environment variable only when the flag is omitted. Other users still fall back to `data/alphaearth`.
+
+For the current 2024 national CROME GeoPackage, county-layer seams can produce positive-area overlaps. Use `--overlap-policy first` for live runs with that package unless you intentionally want overlap errors to stop the workflow.
+
 The legacy wrapper is also available as:
 
 ```bash

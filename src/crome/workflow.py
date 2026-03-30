@@ -16,6 +16,7 @@ from .acquisition.alphaearth import (
 )
 from .acquisition.crome import download_crome_reference
 from .config import AlphaEarthDownloadRequest, CromeDownloadRequest
+from .paths import OUTPUT_ROOT_ENV_VAR, default_output_root
 from .pipeline import BaselinePipelineResult, run_baseline_pipeline
 
 
@@ -151,8 +152,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-root",
-        default="data/alphaearth",
-        help="Base directory for AlphaEarth outputs and downstream artifacts.",
+        default=default_output_root(),
+        help=(
+            "Base directory for AlphaEarth outputs and downstream artifacts. "
+            f"Defaults to ${OUTPUT_ROOT_ENV_VAR} when set, otherwise data/alphaearth."
+        ),
     )
     parser.add_argument(
         "--bbox",

@@ -58,3 +58,13 @@ crome download-run-baseline --year 2017 --aoi-label east-anglia --bbox -1 51 0 5
 ```
 
 The downloader resolves DEFRA search results on `environment.data.gov.uk`, follows the dataset landing page, inspects the server-rendered file list, prefers the national `.gpkg.zip` asset, and falls back to `- Complete` variants for older nationwide releases.
+
+You can set a user-specific default artifact root with:
+
+```bash
+export CROME_DATA_ROOT=/gws/ssde/j25a/nceo_isp/public/CROME
+```
+
+When `CROME_DATA_ROOT` is set, CLI commands use it as the default `--output-root`. This is opt-in and does not change the repo default for other users. An explicit `--output-root` still wins.
+
+The current 2024 national CROME GeoPackage is layered by county and can expose positive-area overlaps at county seams. For that package, use `--overlap-policy first` unless you want the safer default behavior to stop on overlaps.

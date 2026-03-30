@@ -9,7 +9,13 @@ from pathlib import Path
 
 from .config import AlphaEarthDownloadRequest, AlphaEarthTrainingSpec, CromeReferenceConfig
 from .discovery import discover_feature_rasters
-from .labeling import NoReferenceCoverageError, load_reference_label_mapping, rasterize_crome_reference
+from .labeling import (
+    NoReferenceCoverageError,
+    load_reference_label_mapping,
+    rasterize_crome_reference,
+    reference_source_bbox_for_feature_rasters,
+)
+from .paths import OUTPUT_ROOT_ENV_VAR, default_output_root
 from .predict import predict_crop_map
 from .training import TrainingRasterPair, build_training_table_from_pairs, train_random_forest
 
@@ -138,7 +144,15 @@ def run_baseline_pipeline(
     processed_features: list[PipelineFeatureResult] = []
     skipped_features: list[SkippedFeatureResult] = []
     training_pairs: list[TrainingRasterPair] = []
-    global_label_to_id, _ = load_reference_label_mapping(reference_path, label_column)
+    reference_bbox = reference_source_bbox_for_feature_rasters(
+        reference_path,
+        [feature.raster_path for feature in discovered],
+    )
+    global_label_to_id, _ = load_reference_label_mapping(
+        reference_path,
+        label_column,
+        bbox=reference_bbox,
+    )
 
     for feature in discovered:
         output_dir = spec.reference_output_root / "features" / feature.feature_id
@@ -299,7 +313,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference-path", required=True, help="Path to the CROME vector reference file.")
     parser.add_argument("--year", required=True, type=int, help="Reference year.")
     parser.add_argument("--aoi-label", default=None, help="Optional run label used for output naming.")
-    parser.add_argument("--output-root", default="data/alphaearth", help="Base output directory.")
+    parser.add_argument(
+        "--output-root",
+        default=default_output_root(),
+        help=(
+            f"Base output directory. Defaults to ${OUTPUT_ROOT_ENV_VAR} when set, "
+            "otherwise data/alphaearth."
+        ),
+    )
     parser.add_argument("--label-column", default="lucode", help="Reference class column.")
     parser.add_argument("--geometry-column", default="geometry", help="Reference geometry column.")
     parser.add_argument(

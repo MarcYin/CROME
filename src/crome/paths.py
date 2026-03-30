@@ -1,10 +1,26 @@
 """Path helpers for AlphaEarth outputs and reference targets."""
 
+import os
 from pathlib import Path
 import re
 
+_DEFAULT_OUTPUT_ROOT = "data/alphaearth"
+OUTPUT_ROOT_ENV_VAR = "CROME_DATA_ROOT"
 
 _SAFE_LABEL_PATTERN = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def default_output_root() -> str:
+    """Return the user-scoped default artifact root.
+
+    The package default stays ``data/alphaearth`` unless a user explicitly exports
+    ``CROME_DATA_ROOT`` in their own environment.
+    """
+
+    value = os.environ.get(OUTPUT_ROOT_ENV_VAR)
+    if value is None or not value.strip():
+        return _DEFAULT_OUTPUT_ROOT
+    return value.strip()
 
 
 def sanitize_label(label: str | None, default: str = "aoi") -> str:

@@ -72,6 +72,38 @@ def _write_reference_geojson(path: Path) -> None:
     gdf.to_file(path, driver="GeoJSON")
 
 
+def _write_reference_gpkg(path: Path) -> None:
+    left = Polygon([(0, 0), (2, 0), (2, 4), (0, 4)])
+    right = Polygon([(2, 0), (4, 0), (4, 4), (2, 4)])
+    gdf = gpd.GeoDataFrame(
+        {"lucode": ["wheat", "barley"], "geometry": [left, right]},
+        crs="EPSG:3857",
+    )
+    gdf.to_file(path, driver="GPKG")
+
+
+def _write_multilayer_reference_gpkg(path: Path) -> None:
+    non_overlapping = gpd.GeoDataFrame(
+        {
+            "lucode": ["water"],
+            "geometry": [Polygon([(10, 10), (12, 10), (12, 12), (10, 12)])],
+        },
+        crs="EPSG:3857",
+    )
+    overlapping = gpd.GeoDataFrame(
+        {
+            "lucode": ["wheat", "barley"],
+            "geometry": [
+                Polygon([(0, 0), (2, 0), (2, 4), (0, 4)]),
+                Polygon([(2, 0), (4, 0), (4, 4), (2, 4)]),
+            ],
+        },
+        crs="EPSG:3857",
+    )
+    non_overlapping.to_file(path, layer="County_A", driver="GPKG")
+    overlapping.to_file(path, layer="County_B", driver="GPKG")
+
+
 def _write_manifest(path: Path, rasters: list[tuple[str, Path]]) -> None:
     output_root = path.parent.parent if path.parent.name == "manifests" else path.parent
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -149,6 +181,58 @@ def test_end_to_end_pipeline(tmp_path: Path) -> None:
     assert valid.any()
     assert np.array_equal(labels[valid], preds[valid])
 
+    mapping = json.loads(rasterized.label_mapping_path.read_text(encoding="utf-8"))
+    assert mapping["label_to_id"] == {"barley": 0, "wheat": 1}
+
+
+def test_rasterize_reference_supports_gpkg_sources(tmp_path: Path) -> None:
+    feature_raster = tmp_path / "alphaearth.tif"
+    reference_gpkg = tmp_path / "crome.gpkg"
+    _write_feature_raster(feature_raster)
+    _write_reference_gpkg(reference_gpkg)
+
+    alphaearth = AlphaEarthDownloadRequest(
+        year=2024,
+        output_root=tmp_path / "outputs",
+        aoi_label="east-anglia",
+        bbox=(0.0, 0.0, 4.0, 4.0),
+    )
+    reference = CromeReferenceConfig(
+        source_path=reference_gpkg,
+        year=2024,
+        aoi_label="east-anglia",
+    )
+    spec = AlphaEarthTrainingSpec(alphaearth=alphaearth, reference=reference)
+
+    rasterized = rasterize_crome_reference(feature_raster, spec)
+
+    assert rasterized.label_raster_path.exists()
+    mapping = json.loads(rasterized.label_mapping_path.read_text(encoding="utf-8"))
+    assert mapping["label_to_id"] == {"barley": 0, "wheat": 1}
+
+
+def test_rasterize_reference_supports_multilayer_gpkg_sources(tmp_path: Path) -> None:
+    feature_raster = tmp_path / "alphaearth.tif"
+    reference_gpkg = tmp_path / "crome_multi.gpkg"
+    _write_feature_raster(feature_raster)
+    _write_multilayer_reference_gpkg(reference_gpkg)
+
+    alphaearth = AlphaEarthDownloadRequest(
+        year=2024,
+        output_root=tmp_path / "outputs",
+        aoi_label="east-anglia",
+        bbox=(0.0, 0.0, 4.0, 4.0),
+    )
+    reference = CromeReferenceConfig(
+        source_path=reference_gpkg,
+        year=2024,
+        aoi_label="east-anglia",
+    )
+    spec = AlphaEarthTrainingSpec(alphaearth=alphaearth, reference=reference)
+
+    rasterized = rasterize_crome_reference(feature_raster, spec)
+
+    assert rasterized.label_raster_path.exists()
     mapping = json.loads(rasterized.label_mapping_path.read_text(encoding="utf-8"))
     assert mapping["label_to_id"] == {"barley": 0, "wheat": 1}
 
