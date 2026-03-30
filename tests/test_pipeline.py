@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import geopandas as gpd
@@ -82,6 +83,16 @@ def _write_reference_gpkg(path: Path) -> None:
     gdf.to_file(path, driver="GPKG")
 
 
+def _write_reference_fgb(path: Path) -> None:
+    left = Polygon([(0, 0), (2, 0), (2, 4), (0, 4)])
+    right = Polygon([(2, 0), (4, 0), (4, 4), (2, 4)])
+    gdf = gpd.GeoDataFrame(
+        {"lucode": ["wheat", "barley"], "geometry": [left, right]},
+        crs="EPSG:3857",
+    )
+    gdf.to_file(path, driver="FlatGeobuf")
+
+
 def _write_multilayer_reference_gpkg(path: Path) -> None:
     non_overlapping = gpd.GeoDataFrame(
         {
@@ -102,6 +113,27 @@ def _write_multilayer_reference_gpkg(path: Path) -> None:
     )
     non_overlapping.to_file(path, layer="County_A", driver="GPKG")
     overlapping.to_file(path, layer="County_B", driver="GPKG")
+
+
+def _hexagon(center_x: float, center_y: float, radius: float) -> Polygon:
+    vertices = [
+        (
+            center_x + radius * math.cos(math.radians(angle)),
+            center_y + radius * math.sin(math.radians(angle)),
+        )
+        for angle in range(0, 360, 60)
+    ]
+    return Polygon(vertices)
+
+
+def _write_reference_hex_geojson(path: Path) -> None:
+    left = _hexagon(1.5, 2.5, 1.1)
+    right = _hexagon(5.5, 2.5, 1.1)
+    gdf = gpd.GeoDataFrame(
+        {"lucode": ["wheat", "barley"], "geometry": [left, right]},
+        crs="EPSG:3857",
+    )
+    gdf.to_file(path, driver="GeoJSON")
 
 
 def _write_manifest(path: Path, rasters: list[tuple[str, Path]]) -> None:
@@ -151,7 +183,11 @@ def test_end_to_end_pipeline(tmp_path: Path) -> None:
         year=2024,
         aoi_label="east-anglia",
     )
-    spec = AlphaEarthTrainingSpec(alphaearth=alphaearth, reference=reference)
+    spec = AlphaEarthTrainingSpec(
+        alphaearth=alphaearth,
+        reference=reference,
+        label_mode="polygon_to_pixel",
+    )
 
     rasterized = rasterize_crome_reference(feature_raster, spec)
     training_table = build_training_table(
@@ -202,7 +238,11 @@ def test_rasterize_reference_supports_gpkg_sources(tmp_path: Path) -> None:
         year=2024,
         aoi_label="east-anglia",
     )
-    spec = AlphaEarthTrainingSpec(alphaearth=alphaearth, reference=reference)
+    spec = AlphaEarthTrainingSpec(
+        alphaearth=alphaearth,
+        reference=reference,
+        label_mode="polygon_to_pixel",
+    )
 
     rasterized = rasterize_crome_reference(feature_raster, spec)
 
@@ -228,13 +268,100 @@ def test_rasterize_reference_supports_multilayer_gpkg_sources(tmp_path: Path) ->
         year=2024,
         aoi_label="east-anglia",
     )
-    spec = AlphaEarthTrainingSpec(alphaearth=alphaearth, reference=reference)
+    spec = AlphaEarthTrainingSpec(
+        alphaearth=alphaearth,
+        reference=reference,
+        label_mode="polygon_to_pixel",
+    )
 
     rasterized = rasterize_crome_reference(feature_raster, spec)
 
     assert rasterized.label_raster_path.exists()
     mapping = json.loads(rasterized.label_mapping_path.read_text(encoding="utf-8"))
     assert mapping["label_to_id"] == {"barley": 0, "wheat": 1}
+
+
+def test_rasterize_reference_supports_flatgeobuf_sources(tmp_path: Path) -> None:
+    feature_raster = tmp_path / "alphaearth.tif"
+    reference_fgb = tmp_path / "crome.fgb"
+    _write_feature_raster(feature_raster)
+    _write_reference_fgb(reference_fgb)
+
+    alphaearth = AlphaEarthDownloadRequest(
+        year=2024,
+        output_root=tmp_path / "outputs",
+        aoi_label="east-anglia",
+        bbox=(0.0, 0.0, 4.0, 4.0),
+    )
+    reference = CromeReferenceConfig(
+        source_path=reference_fgb,
+        year=2024,
+        aoi_label="east-anglia",
+    )
+    spec = AlphaEarthTrainingSpec(
+        alphaearth=alphaearth,
+        reference=reference,
+        label_mode="polygon_to_pixel",
+    )
+
+    rasterized = rasterize_crome_reference(feature_raster, spec)
+
+    assert rasterized.label_raster_path.exists()
+    mapping = json.loads(rasterized.label_mapping_path.read_text(encoding="utf-8"))
+    assert mapping["label_to_id"] == {"barley": 0, "wheat": 1}
+
+
+def test_centroid_to_pixel_labels_one_pixel_per_reference_hexagon(tmp_path: Path) -> None:
+    feature_raster = tmp_path / "alphaearth.tif"
+    reference_geojson = tmp_path / "crome_hex.geojson"
+    _write_feature_raster(feature_raster, width=7, height=5, y_origin=5.0)
+    _write_reference_hex_geojson(reference_geojson)
+
+    alphaearth = AlphaEarthDownloadRequest(
+        year=2024,
+        output_root=tmp_path / "outputs",
+        aoi_label="east-anglia",
+        bbox=(0.0, 0.0, 7.0, 5.0),
+    )
+    reference = CromeReferenceConfig(
+        source_path=reference_geojson,
+        year=2024,
+        aoi_label="east-anglia",
+    )
+
+    centroid_spec = AlphaEarthTrainingSpec(
+        alphaearth=alphaearth,
+        reference=reference,
+        label_mode="centroid_to_pixel",
+    )
+    polygon_spec = AlphaEarthTrainingSpec(
+        alphaearth=alphaearth,
+        reference=reference,
+        label_mode="polygon_to_pixel",
+    )
+
+    centroid_rasterized = rasterize_crome_reference(
+        feature_raster,
+        centroid_spec,
+        output_dir=tmp_path / "outputs" / "centroid",
+    )
+    polygon_rasterized = rasterize_crome_reference(
+        feature_raster,
+        polygon_spec,
+        output_dir=tmp_path / "outputs" / "polygon",
+    )
+
+    with rasterio.open(centroid_rasterized.label_raster_path) as src:
+        centroid_labels = src.read(1)
+    with rasterio.open(polygon_rasterized.label_raster_path) as src:
+        polygon_labels = src.read(1)
+
+    centroid_valid = centroid_labels != -1
+    polygon_valid = polygon_labels != -1
+    assert int(centroid_valid.sum()) == 2
+    assert int(polygon_valid.sum()) > int(centroid_valid.sum())
+    assert centroid_labels[2, 1] == 1
+    assert centroid_labels[2, 5] == 0
 
 
 def test_training_and_prediction_ignore_finite_feature_nodata(tmp_path: Path) -> None:
@@ -258,7 +385,11 @@ def test_training_and_prediction_ignore_finite_feature_nodata(tmp_path: Path) ->
         year=2024,
         aoi_label="east-anglia",
     )
-    spec = AlphaEarthTrainingSpec(alphaearth=alphaearth, reference=reference)
+    spec = AlphaEarthTrainingSpec(
+        alphaearth=alphaearth,
+        reference=reference,
+        label_mode="polygon_to_pixel",
+    )
 
     rasterized = rasterize_crome_reference(feature_raster, spec)
     training_table = build_training_table(
@@ -343,6 +474,7 @@ def test_run_baseline_pipeline_batches_native_feature_rasters(tmp_path: Path) ->
         year=2024,
         output_root=tmp_path / "outputs",
         aoi_label="east-anglia",
+        label_mode="polygon_to_pixel",
     )
 
     assert len(result.feature_results) == 3
@@ -396,6 +528,7 @@ def test_run_baseline_pipeline_skips_rasters_without_reference_coverage(tmp_path
         year=2024,
         output_root=tmp_path / "outputs",
         aoi_label="east-anglia",
+        label_mode="polygon_to_pixel",
     )
 
     assert len(result.feature_results) == 1

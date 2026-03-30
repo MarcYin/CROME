@@ -203,7 +203,7 @@ class AlphaEarthTrainingSpec:
 
     alphaearth: AlphaEarthDownloadRequest
     reference: CromeReferenceConfig
-    label_mode: str = "polygon_to_pixel"
+    label_mode: str = "centroid_to_pixel"
     overlap_policy: str = "error"
     nodata_label: int = -1
 
@@ -212,8 +212,10 @@ class AlphaEarthTrainingSpec:
             raise ValueError("AlphaEarth feature year and CROME reference year must match.")
         if self.alphaearth.aoi_label != self.reference.aoi_label:
             raise ValueError("AlphaEarth AOI label and CROME reference AOI label must match.")
-        if self.label_mode not in {"polygon_to_pixel"}:
-            raise ValueError("Only polygon_to_pixel label mode is supported in the first slice.")
+        if self.label_mode not in {"polygon_to_pixel", "centroid_to_pixel"}:
+            raise ValueError("label_mode must be one of: polygon_to_pixel, centroid_to_pixel.")
+        if self.label_mode == "centroid_to_pixel" and self.reference.all_touched:
+            raise ValueError("all_touched is only supported with polygon_to_pixel label mode.")
         if self.overlap_policy not in {"error", "first", "last"}:
             raise ValueError("overlap_policy must be one of: error, first, last.")
 

@@ -75,3 +75,19 @@ def test_load_reference_label_mapping_unions_multilayer_gpkg(tmp_path: Path) -> 
 
     assert labels == ("water", "wheat")
     assert label_to_id == {"water": 0, "wheat": 1}
+
+
+def test_load_reference_label_mapping_reads_distinct_labels_from_flatgeobuf(tmp_path: Path) -> None:
+    fgb_path = tmp_path / "crome.fgb"
+    left = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+    right = Polygon([(1, 0), (2, 0), (2, 1), (1, 1)])
+    gdf = gpd.GeoDataFrame(
+        {"lucode": ["wheat", "barley"], "geometry": [left, right]},
+        crs="EPSG:3857",
+    )
+    gdf.to_file(fgb_path, driver="FlatGeobuf")
+
+    label_to_id, labels = load_reference_label_mapping(fgb_path, "lucode")
+
+    assert labels == ("barley", "wheat")
+    assert label_to_id == {"barley": 0, "wheat": 1}

@@ -6,6 +6,7 @@ import argparse
 import json
 import re
 import shutil
+import subprocess
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,15 +14,19 @@ from typing import Any, Callable
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
+import pyogrio
+
 from crome.config import CromeDownloadRequest
 from crome.paths import (
     OUTPUT_ROOT_ENV_VAR,
     crome_archive_path,
     crome_download_root,
     crome_extract_root,
+    crome_normalized_root,
     default_output_root,
     sanitize_label,
 )
+from crome.runtime import ensure_proj_data_env
 
 _NEXT_DATA_PATTERN = re.compile(
     r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
@@ -83,10 +88,16 @@ class CromeDownloadResult:
     extracted_path: Path | None
     landing_page_url: str
     manifest_path: Path
+    normalized_path: Path | None
     output_root: Path
+    source_layer: str | None
     title: str
     variant: str | None
     year: int
+
+    @property
+    def reference_path(self) -> Path | None:
+        return self.normalized_path or self.extracted_path
 
 
 HttpGetter = Callable[[str, float], HttpResponse]
@@ -103,7 +114,10 @@ def download_result_to_dict(result: CromeDownloadResult) -> dict[str, Any]:
         "extracted_path": str(result.extracted_path) if result.extracted_path is not None else None,
         "landing_page_url": result.landing_page_url,
         "manifest_path": str(result.manifest_path),
+        "normalized_path": str(result.normalized_path) if result.normalized_path is not None else None,
         "output_root": str(result.output_root),
+        "reference_path": str(result.reference_path) if result.reference_path is not None else None,
+        "source_layer": result.source_layer,
         "title": result.title,
         "variant": result.variant,
         "year": result.year,
@@ -339,6 +353,97 @@ def _extract_gpkg_from_archive(
         return extracted_path
 
 
+def _canonical_reference_layer(
+    extracted_path: Path,
+    year: int,
+) -> str:
+    ensure_proj_data_env()
+    layers = pyogrio.list_layers(extracted_path)
+    if len(layers) == 0:
+        raise CromeDownloadError(f"No vector layers were found in {extracted_path}.")
+
+    exact_name = f"Crop_Map_of_England_{year}"
+    for item in layers:
+        layer_name = str(item[0])
+        if layer_name.casefold() == exact_name.casefold():
+            return layer_name
+
+    if len(layers) == 1:
+        return str(layers[0][0])
+
+    ranked: list[tuple[int, int, str]] = []
+    for item in layers:
+        layer_name = str(item[0])
+        info = pyogrio.read_info(extracted_path, layer=layer_name)
+        feature_count = info.get("features")
+        ranked.append(
+            (
+                int(feature_count) if isinstance(feature_count, int) else -1,
+                -len(layer_name),
+                layer_name,
+            )
+        )
+    ranked.sort(reverse=True)
+    return ranked[0][2]
+
+
+def _normalize_gpkg_to_flatgeobuf(
+    extracted_path: Path,
+    output_root: Path,
+    *,
+    year: int,
+    force: bool,
+) -> tuple[Path, str]:
+    ensure_proj_data_env()
+    source_layer = _canonical_reference_layer(extracted_path, year)
+    output_root.mkdir(parents=True, exist_ok=True)
+    normalized_path = output_root / f"{sanitize_label(source_layer, default='crome')}.fgb"
+    if normalized_path.exists() and force:
+        normalized_path.unlink()
+    if normalized_path.exists() and not force:
+        return normalized_path, source_layer
+
+    ogr2ogr = shutil.which("ogr2ogr")
+    if ogr2ogr is not None:
+        completed = subprocess.run(
+            [
+                ogr2ogr,
+                "-f",
+                "FlatGeobuf",
+                str(normalized_path),
+                str(extracted_path),
+                source_layer,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise CromeDownloadError(
+                "ogr2ogr failed while normalizing the CROME GeoPackage to FlatGeobuf: "
+                + completed.stderr.strip()
+            )
+    else:
+        frame = pyogrio.read_dataframe(extracted_path, layer=source_layer)
+        pyogrio.write_dataframe(frame, normalized_path, driver="FlatGeobuf")
+
+    metadata_path = output_root / "manifest.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "normalized_path": str(normalized_path),
+                "source_gpkg": str(extracted_path),
+                "source_layer": source_layer,
+                "year": year,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return normalized_path, source_layer
+
+
 def download_crome_reference(
     request: CromeDownloadRequest,
     http_get: HttpGetter | None = None,
@@ -372,6 +477,8 @@ def download_crome_reference(
         downloader(archive_url, archive_path, request.timeout_s)
 
     extracted_path = None
+    normalized_path = None
+    source_layer = None
     if request.extract:
         extracted_path = _extract_gpkg_from_archive(
             archive_path,
@@ -380,6 +487,16 @@ def download_crome_reference(
                 request.year,
                 variant_label=landing_page.variant_label,
             ),
+            force=request.force,
+        )
+        normalized_path, source_layer = _normalize_gpkg_to_flatgeobuf(
+            extracted_path,
+            crome_normalized_root(
+                request.output_root,
+                request.year,
+                variant_label=landing_page.variant_label,
+            ),
+            year=request.year,
             force=request.force,
         )
 
@@ -392,7 +509,9 @@ def download_crome_reference(
         extracted_path=extracted_path,
         landing_page_url=landing_page.url,
         manifest_path=manifest_path,
+        normalized_path=normalized_path,
         output_root=output_root,
+        source_layer=source_layer,
         title=landing_page.title,
         variant=landing_page.variant,
         year=landing_page.year,
@@ -406,14 +525,14 @@ def download_crome_reference(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Download the national CROME GeoPackage reference for one year."
+        description="Download the national CROME reference for one year and normalize it to FlatGeobuf."
     )
     parser.add_argument("--year", required=True, type=int, help="Target CROME year.")
     parser.add_argument(
         "--output-root",
         default=default_output_root(),
         help=(
-            "Base directory for downloaded CROME archives and extracted GeoPackages. "
+            "Base directory for downloaded CROME archives, extracted GeoPackages, and normalized FlatGeobuf references. "
             f"Defaults to ${OUTPUT_ROOT_ENV_VAR} when set, otherwise data/alphaearth."
         ),
     )
@@ -477,6 +596,13 @@ def main(argv: list[str] | None = None) -> int:
                 "dataset_id": landing_page.dataset_id,
                 "extracted_root": str(
                     crome_extract_root(
+                        request.output_root,
+                        request.year,
+                        variant_label=variant_label,
+                    )
+                ),
+                "normalized_root": str(
+                    crome_normalized_root(
                         request.output_root,
                         request.year,
                         variant_label=variant_label,

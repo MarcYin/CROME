@@ -2,7 +2,10 @@ import json
 from pathlib import Path
 import zipfile
 
+import geopandas as gpd
+import pyogrio
 import pytest
+from shapely.geometry import Polygon
 
 from crome.acquisition.crome import (
     CromeDownloadError,
@@ -13,6 +16,28 @@ from crome.acquisition.crome import (
     resolve_crome_landing_page,
 )
 from crome.config import CromeDownloadRequest
+
+
+def _write_reference_gpkg(path: Path) -> None:
+    national = gpd.GeoDataFrame(
+        {
+            "lucode": ["wheat", "barley"],
+            "geometry": [
+                Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+                Polygon([(2, 0), (4, 0), (4, 2), (2, 2)]),
+            ],
+        },
+        crs="EPSG:27700",
+    )
+    county = gpd.GeoDataFrame(
+        {
+            "lucode": ["wheat"],
+            "geometry": [Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])],
+        },
+        crs="EPSG:27700",
+    )
+    national.to_file(path, layer="Crop_Map_of_England_2017", driver="GPKG")
+    county.to_file(path, layer="Crop_Map_of_England_2017_Cambridgeshire", driver="GPKG")
 
 
 def _next_data_html(page_props: dict) -> str:
@@ -172,9 +197,14 @@ def test_download_crome_reference_writes_expected_archive_and_gpkg(tmp_path: Pat
             "https://environment.data.gov.uk/file-management-open/data-sets/"
             "public-2017/files/Crop_Map_of_England_CROME_2017_Complete.gpkg.zip"
         )
+        source_gpkg = tmp_path / "source.gpkg"
+        _write_reference_gpkg(source_gpkg)
         destination.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(destination, "w") as archive:
-            archive.writestr("Crop_Map_of_England_CROME_2017_Complete.gpkg", b"gpkg-bytes")
+            archive.write(
+                source_gpkg,
+                arcname="Crop_Map_of_England_CROME_2017_Complete.gpkg",
+            )
 
     result = download_crome_reference(request, http_get=http_get, download_file=download_file)
 
@@ -188,4 +218,17 @@ def test_download_crome_reference_writes_expected_archive_and_gpkg(tmp_path: Pat
         / "Crop_Map_of_England_CROME_2017_Complete.gpkg"
     )
     assert result.extracted_path.exists()
+    assert result.normalized_path == (
+        tmp_path
+        / "raw"
+        / "crome"
+        / "CROME_2017_complete"
+        / "normalized"
+        / "Crop_Map_of_England_2017.fgb"
+    )
+    assert result.reference_path == result.normalized_path
+    assert result.source_layer == "Crop_Map_of_England_2017"
+    assert result.normalized_path.exists()
+    info = pyogrio.read_info(result.normalized_path)
+    assert info["features"] == 2
     assert json.loads(result.manifest_path.read_text(encoding="utf-8"))["dataset_id"] == "complete"

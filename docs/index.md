@@ -29,10 +29,11 @@ crome run-baseline-pipeline --feature-input ./download-output --reference-path c
 ```
 
 `download-run-baseline` is the shortest operator path when you want the package to call `edown`, discover native AlphaEarth rasters, rasterize CROME labels, train the baseline model, and emit prediction rasters in one pass.
-If you do not pass `--reference-path`, the workflow now auto-downloads the national CROME GeoPackage from DEFRA DSP and uses the extracted `.gpkg` as the reference source.
+If you do not pass `--reference-path`, the workflow now auto-downloads the national CROME GeoPackage from DEFRA DSP, selects the canonical national layer, and normalizes it to FlatGeobuf before using it as the reference source.
 `run-baseline-pipeline` accepts either a single feature raster, a directory tree of native AlphaEarth GeoTIFFs, or an `edown` manifest via `--manifest-path`.
 When multiple native rasters are present, the batch pipeline keeps one global CROME label mapping across the run and prefers feature-level holdout over pixel-level holdout.
 `download-crome` resolves the DEFRA search results and landing-page `files` list, prefers the national `.gpkg.zip` asset for the requested year, and automatically falls back to `- Complete` nationwide releases for older years such as 2016 and 2017.
+The default label mode is `centroid_to_pixel`, so each CROME hexagon contributes supervision at the single AlphaEarth pixel containing its centroid. Pass `--label-mode polygon_to_pixel` if you intentionally want polygon-fill training labels.
 
 To keep a user-specific shared data root without hardcoding it into the project, set:
 
@@ -42,7 +43,7 @@ export CROME_DATA_ROOT=/gws/ssde/j25a/nceo_isp/public/CROME
 
 All CLI commands that accept `--output-root` use that environment variable only when the flag is omitted. Other users still fall back to `data/alphaearth`.
 
-For the current 2024 national CROME GeoPackage, county-layer seams can produce positive-area overlaps. Use `--overlap-policy first` for live runs with that package unless you intentionally want overlap errors to stop the workflow.
+For the current 2024 national CROME GeoPackage, county-layer seams can produce positive-area overlaps. Auto-downloaded references now avoid that by normalizing the national layer to FlatGeobuf. If you point the pipeline at a raw overlapping vector source, use `--overlap-policy first` for live runs unless you intentionally want overlap errors to stop the workflow.
 
 The legacy wrapper is also available as:
 

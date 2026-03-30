@@ -197,6 +197,7 @@ def test_cli_download_run_baseline_uses_env_output_root(monkeypatch, capsys) -> 
     payload = json.loads(capsys.readouterr().out)
     assert payload["download"]["output_root"] == "/gws/ssde/j25a/nceo_isp/public/CROME"
     assert payload["reference_download"]["output_root"] == "/gws/ssde/j25a/nceo_isp/public/CROME"
+    assert payload["pipeline"]["label_mode"] == "centroid_to_pixel"
     assert payload["pipeline"]["output_root"] == "/gws/ssde/j25a/nceo_isp/public/CROME"
 
 
@@ -303,6 +304,8 @@ def test_cli_end_to_end_pipeline(tmp_path: Path) -> None:
                 "east-anglia",
                 "--output-root",
                 str(output_root),
+                "--label-mode",
+                "polygon_to_pixel",
             ]
         )
         == 0
@@ -398,6 +401,8 @@ def test_cli_run_baseline_pipeline_from_manifest(tmp_path: Path, capsys) -> None
             "east-anglia",
             "--output-root",
             str(output_root),
+            "--label-mode",
+            "polygon_to_pixel",
         ]
     )
 
@@ -449,6 +454,8 @@ def test_cli_download_run_baseline(monkeypatch, tmp_path: Path, capsys) -> None:
             str(reference_geojson),
             "--output-root",
             str(output_root),
+            "--label-mode",
+            "polygon_to_pixel",
         ]
     )
 
@@ -491,7 +498,10 @@ def test_cli_download_run_baseline_auto_downloads_crome(monkeypatch, tmp_path: P
             extracted_path=extracted_reference,
             landing_page_url="https://environment.data.gov.uk/dataset/2024",
             manifest_path=tmp_path / "raw" / "crome" / "manifest.json",
+            normalized_path=None,
             output_root=extracted_reference.parent.parent,
+            reference_path=extracted_reference,
+            source_layer="Crop_Map_of_England_2024",
             title="Crop Map of England (CROME) 2024",
             variant=None,
             year=request.year,
@@ -514,12 +524,15 @@ def test_cli_download_run_baseline_auto_downloads_crome(monkeypatch, tmp_path: P
             "52.0",
             "--output-root",
             str(output_root),
+            "--label-mode",
+            "polygon_to_pixel",
         ]
     )
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["reference_download"]["dataset_id"] == "2024"
+    assert payload["reference_download"]["reference_path"] == str(extracted_reference)
     assert payload["pipeline"]["feature_count"] == 1
 
 

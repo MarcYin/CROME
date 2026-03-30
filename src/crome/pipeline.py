@@ -79,6 +79,7 @@ def _build_training_spec(
     aoi_label: str | None,
     label_column: str,
     geometry_column: str,
+    label_mode: str,
     overlap_policy: str,
     all_touched: bool,
     nodata_label: int,
@@ -100,6 +101,7 @@ def _build_training_spec(
     return AlphaEarthTrainingSpec(
         alphaearth=alphaearth,
         reference=reference,
+        label_mode=label_mode,
         overlap_policy=overlap_policy,
         nodata_label=nodata_label,
     )
@@ -115,6 +117,7 @@ def run_baseline_pipeline(
     aoi_label: str | None = None,
     label_column: str = "lucode",
     geometry_column: str = "geometry",
+    label_mode: str = "centroid_to_pixel",
     overlap_policy: str = "error",
     all_touched: bool = False,
     nodata_label: int = -1,
@@ -136,6 +139,7 @@ def run_baseline_pipeline(
         aoi_label=aoi_label,
         label_column=label_column,
         geometry_column=geometry_column,
+        label_mode=label_mode,
         overlap_policy=overlap_policy,
         all_touched=all_touched,
         nodata_label=nodata_label,
@@ -259,6 +263,7 @@ def run_baseline_pipeline(
         "metrics": metrics_payload,
         "metrics_path": str(trained.metrics_path),
         "model_path": str(trained.model_path),
+        "label_mode": spec.label_mode,
         "prediction_output_root": str(spec.prediction_output_root) if predict else None,
         "reference_path": str(reference_path),
         "skipped_feature_count": len(skipped_features),
@@ -324,6 +329,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--label-column", default="lucode", help="Reference class column.")
     parser.add_argument("--geometry-column", default="geometry", help="Reference geometry column.")
     parser.add_argument(
+        "--label-mode",
+        choices=("centroid_to_pixel", "polygon_to_pixel"),
+        default="centroid_to_pixel",
+        help="How CROME vector labels are transferred onto the AlphaEarth grid.",
+    )
+    parser.add_argument(
         "--overlap-policy",
         choices=("error", "first", "last"),
         default="error",
@@ -363,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
         aoi_label=args.aoi_label,
         label_column=args.label_column,
         geometry_column=args.geometry_column,
+        label_mode=args.label_mode,
         overlap_policy=args.overlap_policy,
         all_touched=args.all_touched,
         nodata_label=args.nodata_label,

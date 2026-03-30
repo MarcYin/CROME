@@ -14,6 +14,7 @@ import pandas as pd
 import pyogrio
 import rasterio
 from rasterio.features import rasterize
+from rasterio.transform import rowcol
 from rasterio.warp import transform_bounds
 from shapely.geometry import box
 
@@ -256,7 +257,7 @@ def _load_reference_geometries(
     if gdf.empty:
         raise NoReferenceCoverageError("Reference geometries do not intersect the feature raster bounds.")
 
-    if spec.overlap_policy == "error" and _has_positive_area_overlaps(gdf):
+    if spec.label_mode == "polygon_to_pixel" and spec.overlap_policy == "error" and _has_positive_area_overlaps(gdf):
         raise ValueError("Reference geometries overlap with positive area; overlap_policy='error'.")
 
     return gdf
@@ -310,6 +311,45 @@ def reference_source_bbox_for_feature_rasters(
     return (minx, miny, maxx, maxy)
 
 
+def _centroid_label_array(
+    gdf: gpd.GeoDataFrame,
+    feature_spec: object,
+    spec: AlphaEarthTrainingSpec,
+    label_to_id: dict[str, int],
+) -> np.ndarray:
+    label_array = np.full((feature_spec.height, feature_spec.width), spec.nodata_label, dtype="int32")
+
+    for row in gdf.itertuples(index=False):
+        geometry = row.geometry
+        if geometry is None or geometry.is_empty:
+            continue
+        point = geometry.centroid
+        if not geometry.covers(point):
+            point = geometry.representative_point()
+        row_index, col_index = rowcol(feature_spec.transform, point.x, point.y)
+        if (
+            row_index < 0
+            or row_index >= feature_spec.height
+            or col_index < 0
+            or col_index >= feature_spec.width
+        ):
+            continue
+
+        label_id = label_to_id[str(getattr(row, spec.reference.label_column))]
+        existing = label_array[row_index, col_index]
+        if existing != spec.nodata_label:
+            if spec.overlap_policy == "error":
+                raise ValueError(
+                    "Multiple reference centroids resolved to the same AlphaEarth pixel; "
+                    "set overlap_policy to first or last to continue."
+                )
+            if spec.overlap_policy == "first":
+                continue
+        label_array[row_index, col_index] = label_id
+
+    return label_array
+
+
 def rasterize_crome_reference(
     feature_raster_path: Path | str,
     spec: AlphaEarthTrainingSpec,
@@ -334,23 +374,25 @@ def rasterize_crome_reference(
     output_dir.mkdir(parents=True, exist_ok=True)
     label_raster_path = output_dir / "labels.tif"
     label_mapping_path = output_dir / "labels.json"
+    if spec.label_mode == "centroid_to_pixel":
+        label_array = _centroid_label_array(gdf, feature_spec, spec, label_to_id)
+    else:
+        rows = gdf.itertuples(index=False)
+        shapes = [
+            (row.geometry, label_to_id[str(getattr(row, spec.reference.label_column))])
+            for row in rows
+        ]
+        if spec.overlap_policy == "first":
+            shapes = list(reversed(shapes))
 
-    rows = gdf.itertuples(index=False)
-    shapes = [
-        (row.geometry, label_to_id[str(getattr(row, spec.reference.label_column))])
-        for row in rows
-    ]
-    if spec.overlap_policy == "first":
-        shapes = list(reversed(shapes))
-
-    label_array = rasterize(
-        shapes=shapes,
-        out_shape=(feature_spec.height, feature_spec.width),
-        transform=feature_spec.transform,
-        fill=spec.nodata_label,
-        all_touched=spec.reference.all_touched,
-        dtype="int32",
-    )
+        label_array = rasterize(
+            shapes=shapes,
+            out_shape=(feature_spec.height, feature_spec.width),
+            transform=feature_spec.transform,
+            fill=spec.nodata_label,
+            all_touched=spec.reference.all_touched,
+            dtype="int32",
+        )
     if not np.any(label_array != spec.nodata_label):
         raise NoReferenceCoverageError("Reference geometries rasterized to no labeled pixels.")
 
@@ -371,6 +413,7 @@ def rasterize_crome_reference(
         dst.update_tags(
             aoi_label=spec.alphaearth.aoi_label or "",
             label_column=spec.reference.label_column,
+            label_mode=spec.label_mode,
             overlap_policy=spec.overlap_policy,
             reference_path=str(spec.reference.source_path),
             year=str(spec.reference.year),
@@ -414,6 +457,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--label-column", default="lucode", help="Reference class column.")
     parser.add_argument("--geometry-column", default="geometry", help="Reference geometry column.")
+    parser.add_argument(
+        "--label-mode",
+        choices=("centroid_to_pixel", "polygon_to_pixel"),
+        default="centroid_to_pixel",
+        help="How CROME vector labels are transferred onto the AlphaEarth grid.",
+    )
     parser.add_argument(
         "--overlap-policy",
         choices=("error", "first", "last"),
@@ -459,6 +508,7 @@ def main(argv: list[str] | None = None) -> int:
     spec = AlphaEarthTrainingSpec(
         alphaearth=alphaearth,
         reference=reference,
+        label_mode=args.label_mode,
         overlap_policy=args.overlap_policy,
         nodata_label=args.nodata_label,
     )

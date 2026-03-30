@@ -61,7 +61,10 @@ def _reference_result_to_dict(result: Any | None) -> dict[str, Any] | None:
         "extracted_path": str(result.extracted_path) if result.extracted_path is not None else None,
         "landing_page_url": result.landing_page_url,
         "manifest_path": str(result.manifest_path),
+        "normalized_path": str(result.normalized_path) if result.normalized_path is not None else None,
         "output_root": str(result.output_root),
+        "reference_path": str(result.reference_path) if result.reference_path is not None else None,
+        "source_layer": result.source_layer,
         "title": result.title,
         "variant": result.variant,
         "year": result.year,
@@ -81,6 +84,7 @@ def download_and_run_baseline(
     force_reference_download: bool = False,
     label_column: str = "lucode",
     geometry_column: str = "geometry",
+    label_mode: str = "centroid_to_pixel",
     overlap_policy: str = "error",
     all_touched: bool = False,
     nodata_label: int = -1,
@@ -112,7 +116,7 @@ def download_and_run_baseline(
                 force=force_reference_download,
             )
         )
-        resolved_reference_path = reference_download.extracted_path
+        resolved_reference_path = reference_download.reference_path
     if resolved_reference_path is None:
         raise ValueError("A CROME reference path could not be resolved.")
     pipeline = run_baseline_pipeline(
@@ -124,6 +128,7 @@ def download_and_run_baseline(
         aoi_label=request.aoi_label,
         label_column=label_column,
         geometry_column=geometry_column,
+        label_mode=label_mode,
         overlap_policy=overlap_policy,
         all_touched=all_touched,
         nodata_label=nodata_label,
@@ -189,6 +194,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--label-column", default="lucode", help="Reference class column.")
     parser.add_argument("--geometry-column", default="geometry", help="Reference geometry column.")
     parser.add_argument(
+        "--label-mode",
+        choices=("centroid_to_pixel", "polygon_to_pixel"),
+        default="centroid_to_pixel",
+        help="How CROME vector labels are transferred onto the AlphaEarth grid.",
+    )
+    parser.add_argument(
         "--overlap-policy",
         choices=("error", "first", "last"),
         default="error",
@@ -253,6 +264,7 @@ def main(argv: list[str] | None = None) -> int:
                 "aoi_label": request.aoi_label,
                 "fail_on_empty_labels": args.fail_on_empty_labels,
                 "geometry_column": args.geometry_column,
+                "label_mode": args.label_mode,
                 "label_column": args.label_column,
                 "n_estimators": args.n_estimators,
                 "no_predict": args.no_predict,
@@ -280,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         force_reference_download=args.force_crome_download,
         label_column=args.label_column,
         geometry_column=args.geometry_column,
+        label_mode=args.label_mode,
         overlap_policy=args.overlap_policy,
         all_touched=args.all_touched,
         nodata_label=args.nodata_label,

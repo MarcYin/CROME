@@ -89,6 +89,16 @@ def crome_extract_root(
     return crome_download_root(base_output_root, year, variant_label) / "extracted"
 
 
+def crome_normalized_root(
+    base_output_root: Path | str,
+    year: int,
+    variant_label: str | None = None,
+) -> Path:
+    """Return the normalized-vector directory for one downloaded CROME archive."""
+
+    return crome_download_root(base_output_root, year, variant_label) / "normalized"
+
+
 def reference_run_name(
     aoi_label: str | None,
     year: int,
