@@ -163,13 +163,62 @@ def _path_signature(path: Path | str) -> dict[str, object]:
     }
 
 
-def _sample_cache_key(pair: TrainingRasterPair) -> str:
+def _label_raster_signature(path: Path | str) -> dict[str, object]:
+    resolved = Path(path).resolve()
+    digest = hashlib.sha256()
+    with rasterio.open(resolved) as src:
+        for _, window in src.block_windows(1):
+            digest.update(src.read(1, window=window, masked=False).tobytes())
+        return {
+            "band_sha256": digest.hexdigest(),
+            "bounds": [float(value) for value in src.bounds],
+            "crs": str(src.crs) if src.crs is not None else None,
+            "dtype": str(src.dtypes[0]),
+            "height": int(src.height),
+            "nodata": src.nodata,
+            "transform": [float(value) for value in src.transform[:6]],
+            "width": int(src.width),
+        }
+
+
+def _canonical_label_mapping_signature(
+    label_mapping: dict[str, object] | None,
+) -> dict[str, object] | None:
+    if label_mapping is None:
+        return None
+    return {
+        "feature_bounds": label_mapping.get("feature_bounds"),
+        "feature_crs": label_mapping.get("feature_crs"),
+        "feature_shape": label_mapping.get("feature_shape"),
+        "geometry_column": label_mapping.get("geometry_column"),
+        "id_to_label": label_mapping.get("id_to_label"),
+        "label_column": label_mapping.get("label_column"),
+        "label_mode": label_mapping.get("label_mode"),
+        "label_to_id": label_mapping.get("label_to_id"),
+        "nodata_label": label_mapping.get("nodata_label"),
+        "reference_bounds_in_feature_crs": label_mapping.get("reference_bounds_in_feature_crs"),
+        "reference_centroid_bounds_in_feature_crs": label_mapping.get(
+            "reference_centroid_bounds_in_feature_crs"
+        ),
+        "reference_feature_count": label_mapping.get("reference_feature_count"),
+        "year": label_mapping.get("year"),
+    }
+
+
+def _pair_source_signatures(pair: TrainingRasterPair) -> dict[str, object]:
     label_mapping = _load_pair_label_mapping(pair)
+    return {
+        "feature_raster": _path_signature(pair.feature_raster_path),
+        "label_mapping": _canonical_label_mapping_signature(label_mapping),
+        "label_raster": _label_raster_signature(pair.label_raster_path),
+    }
+
+
+def _sample_cache_key(pair: TrainingRasterPair) -> str:
     payload = {
         "feature_id": pair.feature_id,
         "feature_raster": _path_signature(pair.feature_raster_path),
-        "label_mapping": label_mapping,
-        "label_raster": _path_signature(pair.label_raster_path) if label_mapping is None else None,
+        "label_signatures": _pair_source_signatures(pair),
         "schema_version": _TRAINING_SAMPLE_CACHE_SCHEMA_VERSION,
         "source_image_id": pair.source_image_id,
     }
@@ -216,11 +265,7 @@ def _extract_training_frame(
         "row_count": int(label_vector.shape[0]),
         "sample_cache_schema_version": _TRAINING_SAMPLE_CACHE_SCHEMA_VERSION,
         "source_image_id": pair.source_image_id,
-        "source_signatures": {
-            "feature_raster": _path_signature(pair.feature_raster_path),
-            "label_mapping": label_mapping,
-            "label_raster": _path_signature(pair.label_raster_path) if label_mapping is None else None,
-        },
+        "source_signatures": _pair_source_signatures(pair),
     }
     if pair.label_mapping_path is not None:
         metadata["label_mapping_path"] = str(pair.label_mapping_path)
@@ -241,12 +286,7 @@ def _load_cached_training_frame(
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     if metadata.get("sample_cache_schema_version") != _TRAINING_SAMPLE_CACHE_SCHEMA_VERSION:
         return None
-    label_mapping = _load_pair_label_mapping(pair)
-    expected_signatures = {
-        "feature_raster": _path_signature(pair.feature_raster_path),
-        "label_mapping": label_mapping,
-        "label_raster": _path_signature(pair.label_raster_path) if label_mapping is None else None,
-    }
+    expected_signatures = _pair_source_signatures(pair)
     if metadata.get("source_signatures") != expected_signatures:
         return None
 

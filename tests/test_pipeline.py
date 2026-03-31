@@ -629,6 +629,83 @@ def test_build_training_table_reuses_sample_cache(tmp_path: Path, monkeypatch) -
     assert metadata["sample_cache_root"] == str(sample_cache_root)
 
 
+def test_build_training_table_reuses_cache_when_aoi_label_changes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    feature_raster = tmp_path / "alphaearth.tif"
+    reference_geojson = tmp_path / "crome.geojson"
+    _write_feature_raster(feature_raster)
+    _write_reference_geojson(reference_geojson)
+
+    alphaearth = AlphaEarthDownloadRequest(
+        year=2024,
+        output_root=tmp_path / "outputs",
+        aoi_label="run-one",
+        bbox=(0.0, 0.0, 4.0, 4.0),
+    )
+    reference = CromeReferenceConfig(
+        source_path=reference_geojson,
+        year=2024,
+        aoi_label=alphaearth.aoi_label,
+    )
+    spec = AlphaEarthTrainingSpec(
+        alphaearth=alphaearth,
+        reference=reference,
+        label_mode="centroid_to_pixel",
+    )
+
+    first_rasterized = rasterize_crome_reference(
+        feature_raster,
+        spec,
+        output_dir=tmp_path / "outputs" / "run-one",
+    )
+    second_rasterized = rasterize_crome_reference(
+        feature_raster,
+        spec,
+        output_dir=tmp_path / "outputs" / "run-two",
+    )
+    second_mapping = json.loads(second_rasterized.label_mapping_path.read_text(encoding="utf-8"))
+    second_mapping["aoi_label"] = "run-two"
+    second_rasterized.label_mapping_path.write_text(
+        json.dumps(second_mapping, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    sample_cache_root = tmp_path / "outputs" / "cache"
+    training_module.build_training_table_from_pairs(
+        [
+            TrainingRasterPair(
+                feature_raster,
+                first_rasterized.label_raster_path,
+                label_mapping_path=first_rasterized.label_mapping_path,
+            )
+        ],
+        tmp_path / "outputs" / "training-first",
+        sample_cache_root=sample_cache_root,
+    )
+
+    def fail_extract(_pair):
+        raise AssertionError("cache miss: training rows were extracted again")
+
+    monkeypatch.setattr(training_module, "_extract_training_frame", fail_extract)
+    second = training_module.build_training_table_from_pairs(
+        [
+            TrainingRasterPair(
+                feature_raster,
+                second_rasterized.label_raster_path,
+                label_mapping_path=second_rasterized.label_mapping_path,
+            )
+        ],
+        tmp_path / "outputs" / "training-second",
+        sample_cache_root=sample_cache_root,
+    )
+
+    metadata = json.loads(second.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["cache_hit_count"] == 1
+    assert metadata["cache_miss_count"] == 0
+
+
 def test_build_training_table_from_cache_manifests_deduplicates_cached_sources(tmp_path: Path) -> None:
     feature_raster = tmp_path / "alphaearth.tif"
     reference_geojson = tmp_path / "crome.geojson"
