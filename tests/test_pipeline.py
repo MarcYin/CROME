@@ -11,13 +11,14 @@ import rasterio
 from rasterio.transform import from_origin
 from shapely.geometry import Polygon
 
+import crome.training as training_module
 from crome.bands import ALPHAEARTH_BANDS
 from crome.config import AlphaEarthDownloadRequest, AlphaEarthTrainingSpec, CromeReferenceConfig
 from crome.discovery import discover_feature_rasters
 from crome.labeling import rasterize_crome_reference
 from crome.pipeline import run_baseline_pipeline
 from crome.predict import predict_crop_map
-from crome.training import build_training_table, train_random_forest
+from crome.training import TrainingRasterPair, build_training_table, train_random_forest
 
 
 def _write_feature_raster(
@@ -136,7 +137,13 @@ def _write_reference_hex_geojson(path: Path) -> None:
     gdf.to_file(path, driver="GeoJSON")
 
 
-def _write_manifest(path: Path, rasters: list[tuple[str, Path]]) -> None:
+def _write_manifest(
+    path: Path,
+    rasters: list[tuple[str, Path]],
+    *,
+    aoi_bounds: tuple[float, float, float, float] | None = None,
+    chunk_count: int | None = None,
+) -> None:
     output_root = path.parent.parent if path.parent.name == "manifests" else path.parent
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -145,6 +152,7 @@ def _write_manifest(path: Path, rasters: list[tuple[str, Path]]) -> None:
             "output_root": str(output_root),
             "results": [
                 {
+                    "chunk_count": chunk_count,
                     "image_id": image_id,
                     "status": "downloaded",
                     "tiff_path": str(raster.relative_to(output_root)),
@@ -154,6 +162,7 @@ def _write_manifest(path: Path, rasters: list[tuple[str, Path]]) -> None:
         },
         "schema_version": "0.1.1",
         "search": {
+            "aoi_bounds": list(aoi_bounds) if aoi_bounds is not None else None,
             "images": [
                 {
                     "image_id": image_id,
@@ -219,6 +228,8 @@ def test_end_to_end_pipeline(tmp_path: Path) -> None:
 
     mapping = json.loads(rasterized.label_mapping_path.read_text(encoding="utf-8"))
     assert mapping["label_to_id"] == {"barley": 0, "wheat": 1}
+    assert mapping["label_stats"]["labeled_pixel_count"] == 16
+    assert mapping["reference_feature_count"] == 2
 
 
 def test_rasterize_reference_supports_gpkg_sources(tmp_path: Path) -> None:
@@ -465,6 +476,7 @@ def test_run_baseline_pipeline_batches_native_feature_rasters(tmp_path: Path) ->
             ("IMAGE_LEFT", second_raster),
             ("IMAGE_RIGHT", third_raster),
         ],
+        aoi_bounds=(0.0, 0.0, 4.0, 4.0),
     )
 
     result = run_baseline_pipeline(
@@ -482,6 +494,9 @@ def test_run_baseline_pipeline_batches_native_feature_rasters(tmp_path: Path) ->
     assert result.training_table_path.exists()
     assert result.model_path.exists()
     assert result.pipeline_manifest_path.exists()
+    assert result.qc_manifest_path.exists()
+    assert result.sample_cache_manifest_path is not None
+    assert result.sample_cache_manifest_path.exists()
 
     table = pd.read_pickle(result.training_table_path)
     assert set(table["feature_id"]) == {"alphaearth_full", "alphaearth_left", "alphaearth_right"}
@@ -508,7 +523,19 @@ def test_run_baseline_pipeline_batches_native_feature_rasters(tmp_path: Path) ->
         "alphaearth_right",
     ]
     assert payload["metrics"]["label_mapping"]["label_to_id"] == {"barley": 0, "wheat": 1}
+    assert payload["qc_manifest_path"] == str(result.qc_manifest_path)
+    assert payload["sample_cache_manifest_path"] == str(result.sample_cache_manifest_path)
+    assert payload["sample_cache_root"] is not None
     assert payload["skipped_feature_count"] == 0
+
+    qc_payload = json.loads(result.qc_manifest_path.read_text(encoding="utf-8"))
+    assert qc_payload["feature_count"] == 3
+    assert qc_payload["sample_cache_manifest_path"] == str(result.sample_cache_manifest_path)
+    assert qc_payload["reference_path"] == str(reference_geojson)
+    assert qc_payload["reference_summary"]["reference_path"] == str(reference_geojson)
+    assert qc_payload["requested_aoi"]["bounds"] == [0.0, 0.0, 4.0, 4.0]
+    assert qc_payload["features"][0]["label_qc"]["label_stats"]["labeled_pixel_count"] > 0
+    assert Path(qc_payload["features"][0]["label_qc_png_path"]).exists()
 
 
 def test_run_baseline_pipeline_skips_rasters_without_reference_coverage(tmp_path: Path) -> None:
@@ -534,3 +561,116 @@ def test_run_baseline_pipeline_skips_rasters_without_reference_coverage(tmp_path
     assert len(result.feature_results) == 1
     assert len(result.skipped_features) == 1
     assert result.skipped_features[0].feature_id == "uncovered"
+
+
+def test_build_training_table_reuses_sample_cache(tmp_path: Path, monkeypatch) -> None:
+    feature_raster = tmp_path / "alphaearth.tif"
+    reference_geojson = tmp_path / "crome.geojson"
+    _write_feature_raster(feature_raster)
+    _write_reference_geojson(reference_geojson)
+
+    alphaearth = AlphaEarthDownloadRequest(
+        year=2024,
+        output_root=tmp_path / "outputs",
+        aoi_label="east-anglia",
+        bbox=(0.0, 0.0, 4.0, 4.0),
+    )
+    reference = CromeReferenceConfig(
+        source_path=reference_geojson,
+        year=2024,
+        aoi_label="east-anglia",
+    )
+    spec = AlphaEarthTrainingSpec(
+        alphaearth=alphaearth,
+        reference=reference,
+        label_mode="polygon_to_pixel",
+    )
+    rasterized = rasterize_crome_reference(feature_raster, spec)
+    rerasterized = rasterize_crome_reference(
+        feature_raster,
+        spec,
+        output_dir=tmp_path / "outputs" / "rerasterized",
+    )
+
+    sample_cache_root = tmp_path / "outputs" / "cache"
+    first = training_module.build_training_table_from_pairs(
+        [
+            TrainingRasterPair(
+                feature_raster,
+                rasterized.label_raster_path,
+                label_mapping_path=rasterized.label_mapping_path,
+            )
+        ],
+        tmp_path / "outputs" / "training-first",
+        sample_cache_root=sample_cache_root,
+    )
+    assert first.sample_cache_manifest_path is not None
+    assert first.sample_cache_manifest_path.exists()
+
+    def fail_extract(_pair):
+        raise AssertionError("cache miss: training rows were extracted again")
+
+    monkeypatch.setattr(training_module, "_extract_training_frame", fail_extract)
+    second = training_module.build_training_table_from_pairs(
+        [
+            TrainingRasterPair(
+                feature_raster,
+                rerasterized.label_raster_path,
+                label_mapping_path=rerasterized.label_mapping_path,
+            )
+        ],
+        tmp_path / "outputs" / "training-second",
+        sample_cache_root=sample_cache_root,
+    )
+
+    metadata = json.loads(second.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["cache_hit_count"] == 1
+    assert metadata["cache_miss_count"] == 0
+    assert metadata["sample_cache_root"] == str(sample_cache_root)
+
+
+def test_build_training_table_from_cache_manifests_deduplicates_cached_sources(tmp_path: Path) -> None:
+    feature_raster = tmp_path / "alphaearth.tif"
+    reference_geojson = tmp_path / "crome.geojson"
+    _write_feature_raster(feature_raster)
+    _write_reference_geojson(reference_geojson)
+
+    alphaearth = AlphaEarthDownloadRequest(
+        year=2024,
+        output_root=tmp_path / "outputs",
+        aoi_label="east-anglia",
+        bbox=(0.0, 0.0, 4.0, 4.0),
+    )
+    reference = CromeReferenceConfig(
+        source_path=reference_geojson,
+        year=2024,
+        aoi_label="east-anglia",
+    )
+    spec = AlphaEarthTrainingSpec(
+        alphaearth=alphaearth,
+        reference=reference,
+        label_mode="polygon_to_pixel",
+    )
+    rasterized = rasterize_crome_reference(feature_raster, spec)
+
+    sample_cache_root = tmp_path / "outputs" / "cache"
+    built = training_module.build_training_table_from_pairs(
+        [
+            TrainingRasterPair(
+                feature_raster,
+                rasterized.label_raster_path,
+                label_mapping_path=rasterized.label_mapping_path,
+            )
+        ],
+        tmp_path / "outputs" / "training",
+        sample_cache_root=sample_cache_root,
+    )
+    assert built.sample_cache_manifest_path is not None
+
+    combined = training_module.build_training_table_from_cache_manifests(
+        [built.sample_cache_manifest_path, built.sample_cache_manifest_path],
+        tmp_path / "outputs" / "training-global",
+    )
+    assert combined.row_count == built.row_count
+    combined_metadata = json.loads(combined.metadata_path.read_text(encoding="utf-8"))
+    assert combined_metadata["cache_entry_count"] == 1

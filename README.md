@@ -8,6 +8,7 @@ Crop classification workflows for UK crop mapping, currently centered on Sentine
 - the new package scaffold now lives under `src/crome`
 - the migration/package/bootstrap plan is tracked in `MIGRATION_PLAN.md`
 - the package now includes a working baseline pipeline from native AlphaEarth raster discovery to CROME-aligned labels, training table aggregation, random-forest model, and predicted crop rasters
+- the pipeline now writes run-level QC/provenance manifests and reusable sampled-row caches so later global model training can reuse AOI samples efficiently
 - AlphaEarth is treated as native image/AOI input data, while CROME remains a vector hexagon reference source for later 10 m label transfer
 - CROME references can now be discovered from DEFRA DSP search pages, resolved to the correct national `.gpkg.zip` asset, downloaded locally, and normalized into a FlatGeobuf reference for the pipeline
 
@@ -39,9 +40,11 @@ Crop classification workflows for UK crop mapping, currently centered on Sentine
 3. Discover native AlphaEarth feature rasters and isolate per-feature artifacts.
 4. Rasterize CROME vector references onto each feature raster grid using one global crop label mapping for the whole batch.
 5. By default, transfer each CROME hexagon to the single AlphaEarth pixel containing its centroid, instead of filling every covered pixel inside the polygon.
-6. Aggregate the feature/label training table across usable rasters, preserving `feature_id` and `source_image_id` lineage.
-7. Train a random-forest baseline model and prefer feature-level holdout when multiple native rasters are available.
-8. Predict 10 m crop maps per native raster.
+6. Cache immutable per-feature sampled rows so repeated AOI runs and later global training can reuse extracted training data instead of rescanning rasters.
+7. Aggregate the feature/label training table across usable rasters, preserving `feature_id` and `source_image_id` lineage.
+8. Write run-level QC/provenance with requested AOI bounds, actual raster bounds, AOI window, label coverage stats, and reference metadata.
+9. Train a random-forest baseline model and prefer feature-level holdout when multiple native rasters are available.
+10. Predict 10 m crop maps per native raster.
 
 ## Reference acquisition
 
@@ -59,6 +62,20 @@ crome download-run-baseline --year 2017 --aoi-label east-anglia --bbox -1 51 0 5
 ```
 
 The downloader resolves DEFRA search results on `environment.data.gov.uk`, follows the dataset landing page, inspects the server-rendered file list, prefers the national `.gpkg.zip` asset, falls back to `- Complete` variants for older nationwide releases, then normalizes the selected national layer into FlatGeobuf for bbox-friendly reads.
+
+Each baseline run now writes:
+- `pipeline.json` for the high-level batch result
+- `qc.json` for AOI-vs-raster coverage, label density, and reference provenance
+- `sample_cache_manifest.json` for reusable sampled-row shards
+
+Those cache manifests can be combined later for efficient global model training without resampling the original rasters:
+
+```bash
+crome build-training-table-from-cache \
+  --cache-manifest ./outputs/training/TRAIN_aoi_2024/dataset/sample_cache_manifest.json \
+  --cache-manifest ./outputs/training/TRAIN_other-aoi_2024/dataset/sample_cache_manifest.json \
+  --output-dir ./outputs/training/global-2024
+```
 
 You can set a user-specific default artifact root with:
 

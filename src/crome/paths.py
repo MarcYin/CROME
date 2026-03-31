@@ -99,6 +99,26 @@ def crome_normalized_root(
     return crome_download_root(base_output_root, year, variant_label) / "normalized"
 
 
+def cache_root(base_output_root: Path | str) -> Path:
+    """Return the shared cache root for reusable pipeline artifacts."""
+
+    return Path(base_output_root) / "cache"
+
+
+def training_sample_cache_root(
+    base_output_root: Path | str,
+    year: int,
+    *,
+    cache_label: str | None = None,
+) -> Path:
+    """Return the reusable training-sample cache root for one year/cache namespace."""
+
+    root = cache_root(base_output_root) / "training_samples" / str(year)
+    if cache_label is None:
+        return root
+    return root / sanitize_label(cache_label, default="default")
+
+
 def reference_run_name(
     aoi_label: str | None,
     year: int,
@@ -135,3 +155,25 @@ def prediction_output_root(base_output_root: Path | str, aoi_label: str | None, 
     """Return the prediction-artifact output directory for one AOI/year run."""
 
     return Path(base_output_root) / "prediction" / f"PRED_{sanitize_label(aoi_label)}_{year}"
+
+
+def sample_cache_root(
+    base_output_root: Path | str,
+    year: int,
+    *,
+    cache_label: str | None = None,
+    label_mode: str,
+    reference_name: str = "crome_hex",
+) -> Path:
+    """Return the reusable sampled-row cache root for one year/label-mode/reference family."""
+
+    root = (
+        cache_root(base_output_root)
+        / "samples"
+        / sanitize_label(reference_name, default="reference")
+        / f"year={year}"
+        / f"label_mode={sanitize_label(label_mode, default='label-mode')}"
+    )
+    if cache_label is None:
+        return root
+    return root / sanitize_label(cache_label, default="default")

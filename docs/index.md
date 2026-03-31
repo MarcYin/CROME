@@ -22,7 +22,8 @@ crome download-crome --year 2017 --output-root ./outputs
 crome download-run-baseline --year 2024 --aoi-label east-anglia --bbox -1 51 0 52 --reference-path crome.geojson --output-root ./outputs
 crome download-run-baseline --year 2017 --aoi-label east-anglia --bbox -1 51 0 52 --output-root ./outputs
 crome rasterize-reference --feature-raster alphaearth.tif --reference-path crome.geojson --year 2024 --aoi-label east-anglia --output-root ./outputs
-crome build-training-table --feature-raster alphaearth.tif --label-raster ./outputs/reference/crome_hex/REF_crome_hex_east-anglia_2024/labels.tif --output-dir ./outputs/training
+crome build-training-table --feature-raster alphaearth.tif --label-raster ./outputs/reference/crome_hex/REF_crome_hex_east-anglia_2024/labels.tif --label-mapping ./outputs/reference/crome_hex/REF_crome_hex_east-anglia_2024/labels.json --output-dir ./outputs/training
+crome build-training-table-from-cache --cache-manifest ./outputs/training/TRAIN_east-anglia_2024/dataset/sample_cache_manifest.json --output-dir ./outputs/training/global-2024
 crome train-model --training-table ./outputs/training/training_table.pkl --output-dir ./outputs/model --label-mapping ./outputs/reference/crome_hex/REF_crome_hex_east-anglia_2024/labels.json
 crome predict-map --feature-raster alphaearth.tif --model-path ./outputs/model/model.pkl --output-raster ./outputs/prediction.tif
 crome run-baseline-pipeline --feature-input ./download-output --reference-path crome.geojson --year 2024 --aoi-label east-anglia --output-root ./outputs
@@ -32,6 +33,8 @@ crome run-baseline-pipeline --feature-input ./download-output --reference-path c
 If you do not pass `--reference-path`, the workflow now auto-downloads the national CROME GeoPackage from DEFRA DSP, selects the canonical national layer, and normalizes it to FlatGeobuf before using it as the reference source.
 `run-baseline-pipeline` accepts either a single feature raster, a directory tree of native AlphaEarth GeoTIFFs, or an `edown` manifest via `--manifest-path`.
 When multiple native rasters are present, the batch pipeline keeps one global CROME label mapping across the run and prefers feature-level holdout over pixel-level holdout.
+Each batch run now writes `qc.json` with requested AOI bounds, actual raster bounds, AOI row/col window, label coverage, and reference provenance.
+The training stage also writes reusable `sample_cache_manifest.json` files so later global model training can combine cached AOI samples without rereading the original feature rasters.
 `download-crome` resolves the DEFRA search results and landing-page `files` list, prefers the national `.gpkg.zip` asset for the requested year, and automatically falls back to `- Complete` nationwide releases for older years such as 2016 and 2017.
 The default label mode is `centroid_to_pixel`, so each CROME hexagon contributes supervision at the single AlphaEarth pixel containing its centroid. Pass `--label-mode polygon_to_pixel` if you intentionally want polygon-fill training labels.
 

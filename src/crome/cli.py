@@ -43,6 +43,16 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[training_table_parser],
         add_help=False,
     )
+    training_table_from_cache_parser = training.build_training_table_from_cache_parser()
+    subparsers.add_parser(
+        "build-training-table-from-cache",
+        help=(
+            training_table_from_cache_parser.description
+            or "Build a training table from one or more cached sample manifests."
+        ),
+        parents=[training_table_from_cache_parser],
+        add_help=False,
+    )
     train_model_parser = training.build_train_model_parser()
     subparsers.add_parser(
         "train-model",
@@ -86,6 +96,8 @@ def main(argv: list[str] | None = None) -> int:
         return labeling.main(forwarded)
     if args.command == "build-training-table":
         return training.main_build_training_table(forwarded)
+    if args.command == "build-training-table-from-cache":
+        return training.main_build_training_table_from_cache(forwarded)
     if args.command == "train-model":
         return training.main_train_model(forwarded)
     if args.command == "predict-map":

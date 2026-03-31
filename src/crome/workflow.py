@@ -45,7 +45,14 @@ def _pipeline_result_to_dict(result: BaselinePipelineResult) -> dict[str, Any]:
         "metrics_path": str(result.metrics_path),
         "model_path": str(result.model_path),
         "pipeline_manifest_path": str(result.pipeline_manifest_path),
+        "qc_manifest_path": str(result.qc_manifest_path),
         "skipped_feature_count": len(result.skipped_features),
+        "sample_cache_manifest_path": (
+            str(result.sample_cache_manifest_path) if result.sample_cache_manifest_path is not None else None
+        ),
+        "sample_cache_root": (
+            str(result.sample_cache_root) if result.sample_cache_root is not None else None
+        ),
         "training_metadata_path": str(result.training_metadata_path),
         "training_table_path": str(result.training_table_path),
     }

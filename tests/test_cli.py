@@ -409,8 +409,83 @@ def test_cli_run_baseline_pipeline_from_manifest(tmp_path: Path, capsys) -> None
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["feature_count"] == 2
+    assert payload["qc_manifest_path"] is not None
+    assert payload["sample_cache_manifest_path"] is not None
     assert payload["skipped_feature_count"] == 0
     assert Path(payload["pipeline_manifest_path"]).exists()
+
+
+def test_cli_build_training_table_from_cache(tmp_path: Path, capsys) -> None:
+    feature_raster = tmp_path / "alphaearth.tif"
+    reference_geojson = tmp_path / "crome.geojson"
+    label_dir = tmp_path / "labels"
+    training_dir = tmp_path / "training"
+    combined_dir = tmp_path / "combined"
+    _write_feature_raster(feature_raster)
+    _write_reference_geojson(reference_geojson)
+
+    assert (
+        cli.main(
+            [
+                "rasterize-reference",
+                "--feature-raster",
+                str(feature_raster),
+                "--reference-path",
+                str(reference_geojson),
+                "--year",
+                "2024",
+                "--aoi-label",
+                "east-anglia",
+                "--output-dir",
+                str(label_dir),
+                "--label-mode",
+                "polygon_to_pixel",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    label_raster = label_dir / "labels.tif"
+    label_mapping = label_dir / "labels.json"
+
+    assert (
+        cli.main(
+            [
+                "build-training-table",
+                "--feature-raster",
+                str(feature_raster),
+                "--label-raster",
+                str(label_raster),
+                "--output-dir",
+                str(training_dir),
+                "--sample-cache-root",
+                str(tmp_path / "sample-cache"),
+                "--label-mapping",
+                str(label_mapping),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    cache_manifest = training_dir / "sample_cache_manifest.json"
+    assert cache_manifest.exists()
+
+    assert (
+        cli.main(
+            [
+                "build-training-table-from-cache",
+                "--cache-manifest",
+                str(cache_manifest),
+                "--output-dir",
+                str(combined_dir),
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["row_count"] > 0
+    assert Path(payload["sample_cache_manifest_path"]).exists()
+    assert Path(payload["table_path"]).exists()
 
 
 def test_cli_download_run_baseline(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -463,6 +538,8 @@ def test_cli_download_run_baseline(monkeypatch, tmp_path: Path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["download"]["manifest_path"] == str(manifest_path)
     assert payload["pipeline"]["feature_count"] == 1
+    assert payload["pipeline"]["qc_manifest_path"] is not None
+    assert payload["pipeline"]["sample_cache_manifest_path"] is not None
     assert Path(payload["pipeline"]["pipeline_manifest_path"]).exists()
 
 
@@ -534,6 +611,7 @@ def test_cli_download_run_baseline_auto_downloads_crome(monkeypatch, tmp_path: P
     assert payload["reference_download"]["dataset_id"] == "2024"
     assert payload["reference_download"]["reference_path"] == str(extracted_reference)
     assert payload["pipeline"]["feature_count"] == 1
+    assert payload["pipeline"]["sample_cache_root"] is not None
 
 
 def test_python_module_cli_executes_main(tmp_path: Path) -> None:

@@ -20,6 +20,7 @@ from .paths import (
     prediction_output_root,
     reference_output_root,
     sanitize_label,
+    sample_cache_root,
     training_output_root,
 )
 
@@ -244,6 +245,26 @@ class AlphaEarthTrainingSpec:
             self.alphaearth.year,
         )
 
+    @property
+    def sample_cache_root(self) -> Path:
+        cache_label = "_".join(
+            [
+                self.reference.reference_name,
+                self.reference.label_column,
+                self.reference.geometry_column,
+                self.label_mode,
+                self.overlap_policy,
+                "all_touched" if self.reference.all_touched else "pixel_center",
+            ]
+        )
+        return sample_cache_root(
+            self.alphaearth.output_root,
+            self.alphaearth.year,
+            cache_label=cache_label,
+            label_mode=self.label_mode,
+            reference_name=self.reference.reference_name,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "alphaearth": self.alphaearth.to_dict(),
@@ -253,5 +274,6 @@ class AlphaEarthTrainingSpec:
             "prediction_output_root": str(self.prediction_output_root),
             "reference": self.reference.to_dict(),
             "reference_output_root": str(self.reference_output_root),
+            "sample_cache_root": str(self.sample_cache_root),
             "training_output_root": str(self.training_output_root),
         }

@@ -350,6 +350,33 @@ def _centroid_label_array(
     return label_array
 
 
+def _label_array_stats(label_array: np.ndarray, nodata_label: int) -> dict[str, object]:
+    valid = label_array != nodata_label
+    labeled_pixel_count = int(valid.sum())
+    payload: dict[str, object] = {
+        "first_labeled_col": None,
+        "first_labeled_row": None,
+        "labeled_fraction": float(labeled_pixel_count / label_array.size) if label_array.size else 0.0,
+        "labeled_pixel_count": labeled_pixel_count,
+        "last_labeled_col": None,
+        "last_labeled_row": None,
+        "pixel_count": int(label_array.size),
+    }
+    if labeled_pixel_count == 0:
+        return payload
+
+    rows, cols = np.nonzero(valid)
+    payload.update(
+        {
+            "first_labeled_col": int(cols.min()),
+            "first_labeled_row": int(rows.min()),
+            "last_labeled_col": int(cols.max()),
+            "last_labeled_row": int(rows.max()),
+        }
+    )
+    return payload
+
+
 def rasterize_crome_reference(
     feature_raster_path: Path | str,
     spec: AlphaEarthTrainingSpec,
@@ -395,6 +422,10 @@ def rasterize_crome_reference(
         )
     if not np.any(label_array != spec.nodata_label):
         raise NoReferenceCoverageError("Reference geometries rasterized to no labeled pixels.")
+    label_stats = _label_array_stats(label_array, spec.nodata_label)
+    centroid_bounds = None
+    if not gdf.empty:
+        centroid_bounds = [float(value) for value in gdf.geometry.centroid.total_bounds]
 
     profile = {
         "driver": "GTiff",
@@ -425,8 +456,15 @@ def rasterize_crome_reference(
         "id_to_label": {str(idx): label for idx, label in enumerate(label_values)},
         "label_column": spec.reference.label_column,
         "label_mode": spec.label_mode,
+        "label_stats": label_stats,
         "label_to_id": label_to_id,
         "nodata_label": spec.nodata_label,
+        "feature_bounds": [float(value) for value in feature_spec.bounds],
+        "feature_crs": feature_spec.crs,
+        "feature_shape": [feature_spec.height, feature_spec.width],
+        "reference_bounds_in_feature_crs": [float(value) for value in gdf.total_bounds],
+        "reference_centroid_bounds_in_feature_crs": centroid_bounds,
+        "reference_feature_count": int(len(gdf)),
         "reference_path": str(spec.reference.source_path),
         "source_feature_raster": str(feature_raster_path),
         "year": spec.reference.year,
@@ -454,6 +492,11 @@ def build_parser() -> argparse.ArgumentParser:
             f"Base output directory. Defaults to ${OUTPUT_ROOT_ENV_VAR} when set, "
             "otherwise data/alphaearth."
         ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional direct output directory for labels.tif and labels.json.",
     )
     parser.add_argument("--label-column", default="lucode", help="Reference class column.")
     parser.add_argument("--geometry-column", default="geometry", help="Reference geometry column.")
@@ -512,7 +555,11 @@ def main(argv: list[str] | None = None) -> int:
         overlap_policy=args.overlap_policy,
         nodata_label=args.nodata_label,
     )
-    result = rasterize_crome_reference(args.feature_raster, spec)
+    result = rasterize_crome_reference(
+        args.feature_raster,
+        spec,
+        output_dir=args.output_dir,
+    )
     print(
         json.dumps(
             {
