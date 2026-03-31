@@ -78,6 +78,18 @@ def _reference_result_to_dict(result: Any | None) -> dict[str, Any] | None:
     }
 
 
+def _should_retry_with_extracted_reference(exc: Exception) -> bool:
+    message = str(exc)
+    return any(
+        token in message
+        for token in (
+            "Reference source does not expose any non-null labels.",
+            "not recognized as being in a supported file format",
+            "No vector layers were found",
+        )
+    )
+
+
 def download_and_run_baseline(
     *,
     year: int,
@@ -126,25 +138,44 @@ def download_and_run_baseline(
         resolved_reference_path = reference_download.reference_path
     if resolved_reference_path is None:
         raise ValueError("A CROME reference path could not be resolved.")
-    pipeline = run_baseline_pipeline(
-        feature_input=download.output_root,
-        manifest_path=download.manifest_path,
-        reference_path=resolved_reference_path,
-        year=request.year,
-        output_root=request.output_root,
-        aoi_label=request.aoi_label,
-        label_column=label_column,
-        geometry_column=geometry_column,
-        label_mode=label_mode,
-        overlap_policy=overlap_policy,
-        all_touched=all_touched,
-        nodata_label=nodata_label,
-        test_size=test_size,
-        random_state=random_state,
-        n_estimators=n_estimators,
-        predict=predict,
-        skip_empty_labels=skip_empty_labels,
-    )
+    pipeline_kwargs = {
+        "feature_input": download.output_root,
+        "manifest_path": download.manifest_path,
+        "year": request.year,
+        "output_root": request.output_root,
+        "aoi_label": request.aoi_label,
+        "label_column": label_column,
+        "geometry_column": geometry_column,
+        "label_mode": label_mode,
+        "overlap_policy": overlap_policy,
+        "all_touched": all_touched,
+        "nodata_label": nodata_label,
+        "test_size": test_size,
+        "random_state": random_state,
+        "n_estimators": n_estimators,
+        "predict": predict,
+        "skip_empty_labels": skip_empty_labels,
+    }
+    try:
+        pipeline = run_baseline_pipeline(
+            reference_path=resolved_reference_path,
+            **pipeline_kwargs,
+        )
+    except Exception as exc:
+        extracted_reference_path = (
+            reference_download.extracted_path if reference_download is not None else None
+        )
+        should_retry = (
+            extracted_reference_path is not None
+            and resolved_reference_path != extracted_reference_path
+            and _should_retry_with_extracted_reference(exc)
+        )
+        if not should_retry:
+            raise
+        pipeline = run_baseline_pipeline(
+            reference_path=extracted_reference_path,
+            **pipeline_kwargs,
+        )
     return DownloadBaselineResult(
         download=download,
         pipeline=pipeline,

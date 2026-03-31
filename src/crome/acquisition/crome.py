@@ -97,7 +97,7 @@ class CromeDownloadResult:
 
     @property
     def reference_path(self) -> Path | None:
-        return self.normalized_path or self.extracted_path
+        return self.extracted_path or self.normalized_path
 
 
 HttpGetter = Callable[[str, float], HttpResponse]
@@ -387,6 +387,35 @@ def _canonical_reference_layer(
     return ranked[0][2]
 
 
+def _is_valid_normalized_reference(normalized_path: Path) -> bool:
+    ensure_proj_data_env()
+    if not normalized_path.exists() or normalized_path.stat().st_size <= 0:
+        return False
+    try:
+        layers = pyogrio.list_layers(normalized_path)
+        if len(layers) == 0:
+            return False
+        info = pyogrio.read_info(normalized_path)
+        feature_count = info.get("features")
+        if not isinstance(feature_count, int) or feature_count <= 0:
+            return False
+        sample = pyogrio.read_dataframe(normalized_path, max_features=1)
+        if sample.empty or sample.geometry is None or sample.geometry.iloc[0] is None:
+            return False
+        geometry = sample.geometry.iloc[0]
+        if geometry.is_empty:
+            return False
+        probe = pyogrio.read_dataframe(
+            normalized_path,
+            read_geometry=False,
+            bbox=tuple(float(value) for value in geometry.bounds),
+            max_features=1,
+        )
+        return not probe.empty
+    except Exception:
+        return False
+
+
 def _normalize_gpkg_to_flatgeobuf(
     extracted_path: Path,
     output_root: Path,
@@ -401,7 +430,9 @@ def _normalize_gpkg_to_flatgeobuf(
     if normalized_path.exists() and force:
         normalized_path.unlink()
     if normalized_path.exists() and not force:
-        return normalized_path, source_layer
+        if _is_valid_normalized_reference(normalized_path):
+            return normalized_path, source_layer
+        normalized_path.unlink()
 
     ogr2ogr = shutil.which("ogr2ogr")
     if ogr2ogr is not None:
@@ -426,6 +457,11 @@ def _normalize_gpkg_to_flatgeobuf(
     else:
         frame = pyogrio.read_dataframe(extracted_path, layer=source_layer)
         pyogrio.write_dataframe(frame, normalized_path, driver="FlatGeobuf")
+
+    if not _is_valid_normalized_reference(normalized_path):
+        raise CromeDownloadError(
+            f"Normalized CROME FlatGeobuf is invalid or unreadable after creation: {normalized_path}"
+        )
 
     metadata_path = output_root / "manifest.json"
     metadata_path.write_text(
@@ -471,8 +507,13 @@ def download_crome_reference(
         archive_filename,
         variant_label=landing_page.variant_label,
     )
+    partial_archive_path = archive_path.with_suffix(archive_path.suffix + ".part")
     if request.force and archive_path.exists():
         archive_path.unlink()
+    if request.force and partial_archive_path.exists():
+        partial_archive_path.unlink()
+    if not archive_path.exists() and partial_archive_path.exists():
+        partial_archive_path.unlink()
     if not archive_path.exists():
         downloader(archive_url, archive_path, request.timeout_s)
 

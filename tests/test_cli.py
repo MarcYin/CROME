@@ -614,6 +614,102 @@ def test_cli_download_run_baseline_auto_downloads_crome(monkeypatch, tmp_path: P
     assert payload["pipeline"]["sample_cache_root"] is not None
 
 
+def test_cli_download_run_baseline_retries_with_extracted_reference(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    feature_dir = tmp_path / "raw"
+    feature_dir.mkdir()
+    feature_raster = feature_dir / "alphaearth_downloaded.tif"
+    manifest_path = feature_dir / "manifests" / "run.json"
+    extracted_reference = tmp_path / "raw" / "crome" / "CROME_2024_national" / "extracted" / "crome_2024.gpkg"
+    normalized_reference = tmp_path / "raw" / "crome" / "CROME_2024_national" / "normalized" / "crome_2024.fgb"
+    output_root = tmp_path / "outputs"
+    _write_feature_raster(feature_raster)
+    extracted_reference.parent.mkdir(parents=True, exist_ok=True)
+    normalized_reference.parent.mkdir(parents=True, exist_ok=True)
+    _write_reference_gpkg(extracted_reference)
+    normalized_reference.write_bytes(b"placeholder")
+    _write_manifest(manifest_path, [("IMAGE_DOWNLOADED", feature_raster)])
+
+    def fake_alphaearth_download(request):
+        return SimpleNamespace(
+            aoi_label=request.aoi_label,
+            bands=request.bands,
+            collection_id=request.collection_id,
+            conditional_year=request.conditional_year,
+            manifest_path=manifest_path,
+            output_root=feature_dir,
+            source_image_ids=("IMAGE_DOWNLOADED",),
+            year=request.year,
+        )
+
+    def fake_crome_download(request):
+        return SimpleNamespace(
+            archive_path=tmp_path / "raw" / "crome" / "archive.zip",
+            archive_url="https://example.test/Crop_Map_of_England_CROME_2024.gpkg.zip",
+            dataset_id="2024",
+            extracted_path=extracted_reference,
+            landing_page_url="https://environment.data.gov.uk/dataset/2024",
+            manifest_path=tmp_path / "raw" / "crome" / "manifest.json",
+            normalized_path=normalized_reference,
+            output_root=extracted_reference.parent.parent,
+            reference_path=normalized_reference,
+            source_layer="Crop_Map_of_England_2024",
+            title="Crop Map of England (CROME) 2024",
+            variant=None,
+            year=request.year,
+        )
+
+    captured_reference_paths: list[str] = []
+
+    def fake_run_pipeline(**kwargs):
+        captured_reference_paths.append(str(kwargs["reference_path"]))
+        if Path(kwargs["reference_path"]) == normalized_reference:
+            raise ValueError("Reference source does not expose any non-null labels.")
+        return SimpleNamespace(
+            feature_results=(SimpleNamespace(),),
+            manifest_path=manifest_path,
+            metrics_path=output_root / "metrics.json",
+            model_path=output_root / "model.pkl",
+            pipeline_manifest_path=output_root / "pipeline.json",
+            qc_manifest_path=output_root / "qc.json",
+            skipped_features=(),
+            sample_cache_manifest_path=output_root / "sample_cache_manifest.json",
+            sample_cache_root=output_root / "cache",
+            training_metadata_path=output_root / "training.json",
+            training_table_path=output_root / "training.pkl",
+        )
+
+    monkeypatch.setattr(cli.workflow, "download_alphaearth_images", fake_alphaearth_download)
+    monkeypatch.setattr(cli.workflow, "download_crome_reference", fake_crome_download)
+    monkeypatch.setattr(cli.workflow, "run_baseline_pipeline", fake_run_pipeline)
+
+    exit_code = cli.main(
+        [
+            "download-run-baseline",
+            "--year",
+            "2024",
+            "--aoi-label",
+            "east-anglia",
+            "--bbox",
+            "-1.0",
+            "51.0",
+            "0.0",
+            "52.0",
+            "--output-root",
+            str(output_root),
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured_reference_paths == [str(normalized_reference), str(extracted_reference)]
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reference_download"]["reference_path"] == str(normalized_reference)
+    assert payload["pipeline"]["feature_count"] == 1
+
+
 def test_python_module_cli_executes_main(tmp_path: Path) -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(Path.cwd() / "src")

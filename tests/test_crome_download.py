@@ -226,9 +226,167 @@ def test_download_crome_reference_writes_expected_archive_and_gpkg(tmp_path: Pat
         / "normalized"
         / "Crop_Map_of_England_2017.fgb"
     )
-    assert result.reference_path == result.normalized_path
+    assert result.reference_path == result.extracted_path
     assert result.source_layer == "Crop_Map_of_England_2017"
     assert result.normalized_path.exists()
     info = pyogrio.read_info(result.normalized_path)
     assert info["features"] == 2
     assert json.loads(result.manifest_path.read_text(encoding="utf-8"))["dataset_id"] == "complete"
+
+
+def test_download_crome_reference_rebuilds_invalid_normalized_fgb(tmp_path: Path) -> None:
+    request = CromeDownloadRequest(year=2017, output_root=tmp_path)
+    search_url = _build_search_url(request, page=1)
+    dataset_url = "https://environment.data.gov.uk/dataset/complete"
+    http_map = {
+        search_url: _search_html(
+            {"id": "complete", "title": "Crop Map of England (CROME) 2017 - Complete"}
+        ),
+        dataset_url: _dataset_html(
+            "Crop Map of England (CROME) 2017 - Complete",
+            [
+                {
+                    "name": "Crop_Map_of_England_CROME_2017_Complete.gpkg.zip",
+                    "fileURI": "https://example.test/Crop_Map_of_England_CROME_2017_Complete.gpkg.zip",
+                }
+            ],
+            file_dataset_id="public-2017",
+        ),
+    }
+
+    def http_get(url: str, _timeout: float) -> HttpResponse:
+        return HttpResponse(body=http_map[url].encode("utf-8"), status_code=200, url=url)
+
+    def download_file(url: str, destination: Path, _timeout: float) -> None:
+        assert url.endswith("Crop_Map_of_England_CROME_2017_Complete.gpkg.zip")
+        source_gpkg = tmp_path / "source.gpkg"
+        _write_reference_gpkg(source_gpkg)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(destination, "w") as archive:
+            archive.write(source_gpkg, arcname="Crop_Map_of_England_CROME_2017_Complete.gpkg")
+
+    normalized_path = (
+        tmp_path
+        / "raw"
+        / "crome"
+        / "CROME_2017_complete"
+        / "normalized"
+        / "Crop_Map_of_England_2017.fgb"
+    )
+    normalized_path.parent.mkdir(parents=True, exist_ok=True)
+    normalized_path.write_bytes(b"")
+
+    result = download_crome_reference(request, http_get=http_get, download_file=download_file)
+
+    assert result.normalized_path == normalized_path
+    assert result.normalized_path.exists()
+    assert result.normalized_path.stat().st_size > 0
+    info = pyogrio.read_info(result.normalized_path)
+    assert info["features"] == 2
+
+
+def test_download_crome_reference_discards_stale_partial_archive(tmp_path: Path) -> None:
+    request = CromeDownloadRequest(year=2017, output_root=tmp_path)
+    search_url = _build_search_url(request, page=1)
+    dataset_url = "https://environment.data.gov.uk/dataset/complete"
+    http_map = {
+        search_url: _search_html(
+            {"id": "complete", "title": "Crop Map of England (CROME) 2017 - Complete"}
+        ),
+        dataset_url: _dataset_html(
+            "Crop Map of England (CROME) 2017 - Complete",
+            [
+                {
+                    "name": "Crop_Map_of_England_CROME_2017_Complete.gpkg.zip",
+                    "fileURI": "https://example.test/Crop_Map_of_England_CROME_2017_Complete.gpkg.zip",
+                }
+            ],
+            file_dataset_id="public-2017",
+        ),
+    }
+
+    def http_get(url: str, _timeout: float) -> HttpResponse:
+        return HttpResponse(body=http_map[url].encode("utf-8"), status_code=200, url=url)
+
+    archive_path = (
+        tmp_path
+        / "raw"
+        / "crome"
+        / "CROME_2017_complete"
+        / "archive"
+        / "Crop_Map_of_England_CROME_2017_Complete.gpkg.zip"
+    )
+    partial_path = archive_path.with_suffix(".zip.part")
+    partial_path.parent.mkdir(parents=True, exist_ok=True)
+    partial_path.write_bytes(b"stale")
+
+    def download_file(url: str, destination: Path, _timeout: float) -> None:
+        assert url.endswith("Crop_Map_of_England_CROME_2017_Complete.gpkg.zip")
+        assert not partial_path.exists()
+        source_gpkg = tmp_path / "source.gpkg"
+        _write_reference_gpkg(source_gpkg)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(destination, "w") as archive:
+            archive.write(source_gpkg, arcname="Crop_Map_of_England_CROME_2017_Complete.gpkg")
+
+    result = download_crome_reference(request, http_get=http_get, download_file=download_file)
+
+    assert result.archive_path.exists()
+    assert not partial_path.exists()
+
+
+def test_download_crome_reference_removes_stale_partial_archive(tmp_path: Path) -> None:
+    request = CromeDownloadRequest(year=2017, output_root=tmp_path)
+    search_url = _build_search_url(request, page=1)
+    dataset_url = "https://environment.data.gov.uk/dataset/complete"
+    http_map = {
+        search_url: _search_html(
+            {"id": "complete", "title": "Crop Map of England (CROME) 2017 - Complete"}
+        ),
+        dataset_url: _dataset_html(
+            "Crop Map of England (CROME) 2017 - Complete",
+            [
+                {
+                    "name": "Crop_Map_of_England_CROME_2017_Complete.gpkg.zip",
+                    "fileURI": "https://example.test/Crop_Map_of_England_CROME_2017_Complete.gpkg.zip",
+                }
+            ],
+            file_dataset_id="public-2017",
+        ),
+    }
+
+    def http_get(url: str, _timeout: float) -> HttpResponse:
+        return HttpResponse(body=http_map[url].encode("utf-8"), status_code=200, url=url)
+
+    archive_path = (
+        tmp_path
+        / "raw"
+        / "crome"
+        / "CROME_2017_complete"
+        / "archive"
+        / "Crop_Map_of_England_CROME_2017_Complete.gpkg.zip"
+    )
+    partial_path = archive_path.with_suffix(".zip.part")
+    partial_path.parent.mkdir(parents=True, exist_ok=True)
+    partial_path.write_bytes(b"stale")
+
+    def download_file(url: str, destination: Path, _timeout: float) -> None:
+        assert url == (
+            "https://environment.data.gov.uk/file-management-open/data-sets/"
+            "public-2017/files/Crop_Map_of_England_CROME_2017_Complete.gpkg.zip"
+        )
+        assert destination == archive_path
+        assert not partial_path.exists()
+        source_gpkg = tmp_path / "source.gpkg"
+        _write_reference_gpkg(source_gpkg)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(destination, "w") as archive:
+            archive.write(
+                source_gpkg,
+                arcname="Crop_Map_of_England_CROME_2017_Complete.gpkg",
+            )
+
+    result = download_crome_reference(request, http_get=http_get, download_file=download_file)
+
+    assert result.archive_path.exists()
+    assert not partial_path.exists()
