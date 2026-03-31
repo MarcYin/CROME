@@ -487,24 +487,33 @@ def test_run_baseline_pipeline_batches_native_feature_rasters(tmp_path: Path) ->
         output_root=tmp_path / "outputs",
         aoi_label="east-anglia",
         label_mode="polygon_to_pixel",
+        test_size=0.0,
     )
 
     assert len(result.feature_results) == 3
     assert not result.skipped_features
-    assert result.training_table_path.exists()
-    assert result.model_path.exists()
     assert result.pipeline_manifest_path.exists()
     assert result.qc_manifest_path.exists()
-    assert result.sample_cache_manifest_path is not None
-    assert result.sample_cache_manifest_path.exists()
+    assert result.sample_cache_root is not None
 
-    table = pd.read_pickle(result.training_table_path)
-    assert set(table["feature_id"]) == {"alphaearth_full", "alphaearth_left", "alphaearth_right"}
-    assert set(table["source_image_id"]) == {"IMAGE_FULL", "IMAGE_LEFT", "IMAGE_RIGHT"}
+    feature_tables = []
 
     for feature in result.feature_results:
+        assert feature.tile_id in {
+            "IMAGE_FULL",
+            "IMAGE_LEFT",
+            "IMAGE_RIGHT",
+        }
         assert feature.label_raster_path.exists()
+        assert feature.training_table_path.exists()
+        assert feature.training_metadata_path.exists()
+        assert feature.model_path.exists()
+        assert feature.metrics_path.exists()
+        assert feature.qc_manifest_path.exists()
+        assert feature.sample_cache_manifest_path is not None
+        assert feature.sample_cache_manifest_path.exists()
         assert feature.prediction_raster_path is not None
+        feature_tables.append(pd.read_pickle(feature.training_table_path))
         with rasterio.open(feature.label_raster_path) as label_src, rasterio.open(
             feature.prediction_raster_path
         ) as pred_src:
@@ -514,23 +523,24 @@ def test_run_baseline_pipeline_batches_native_feature_rasters(tmp_path: Path) ->
         assert valid.any()
         assert np.array_equal(labels[valid], preds[valid])
 
+    table = pd.concat(feature_tables, ignore_index=True)
+    assert set(table["feature_id"]) == {"alphaearth_full", "alphaearth_left", "alphaearth_right"}
+    assert set(table["source_image_id"]) == {"IMAGE_FULL", "IMAGE_LEFT", "IMAGE_RIGHT"}
+
     payload = json.loads(result.pipeline_manifest_path.read_text(encoding="utf-8"))
     assert payload["feature_count"] == 3
-    assert payload["metrics"]["evaluation_mode"] == "feature_holdout"
-    assert sorted(payload["metrics"]["train_feature_ids"] + payload["metrics"]["test_feature_ids"]) == [
-        "alphaearth_full",
-        "alphaearth_left",
-        "alphaearth_right",
-    ]
-    assert payload["metrics"]["label_mapping"]["label_to_id"] == {"barley": 0, "wheat": 1}
+    assert len(payload["features"]) == 3
+    assert all(item["tile_id"] in {"IMAGE_FULL", "IMAGE_LEFT", "IMAGE_RIGHT"} for item in payload["features"])
+    assert all(Path(item["model_path"]).exists() for item in payload["features"])
+    assert all(Path(item["training_table_path"]).exists() for item in payload["features"])
     assert payload["qc_manifest_path"] == str(result.qc_manifest_path)
-    assert payload["sample_cache_manifest_path"] == str(result.sample_cache_manifest_path)
     assert payload["sample_cache_root"] is not None
+    assert len(payload["sample_cache_manifest_paths"]) == 3
     assert payload["skipped_feature_count"] == 0
 
     qc_payload = json.loads(result.qc_manifest_path.read_text(encoding="utf-8"))
     assert qc_payload["feature_count"] == 3
-    assert qc_payload["sample_cache_manifest_path"] == str(result.sample_cache_manifest_path)
+    assert len(qc_payload["sample_cache_manifest_paths"]) == 3
     assert qc_payload["reference_path"] == str(reference_geojson)
     assert qc_payload["reference_summary"]["reference_path"] == str(reference_geojson)
     assert qc_payload["requested_aoi"]["bounds"] == [0.0, 0.0, 4.0, 4.0]

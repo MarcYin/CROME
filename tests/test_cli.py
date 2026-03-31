@@ -409,8 +409,9 @@ def test_cli_run_baseline_pipeline_from_manifest(tmp_path: Path, capsys) -> None
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["feature_count"] == 2
+    assert len(payload["features"]) == 2
     assert payload["qc_manifest_path"] is not None
-    assert payload["sample_cache_manifest_path"] is not None
+    assert all(item["sample_cache_manifest_path"] is not None for item in payload["features"])
     assert payload["skipped_feature_count"] == 0
     assert Path(payload["pipeline_manifest_path"]).exists()
 
@@ -538,8 +539,9 @@ def test_cli_download_run_baseline(monkeypatch, tmp_path: Path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["download"]["manifest_path"] == str(manifest_path)
     assert payload["pipeline"]["feature_count"] == 1
+    assert len(payload["pipeline"]["features"]) == 1
     assert payload["pipeline"]["qc_manifest_path"] is not None
-    assert payload["pipeline"]["sample_cache_manifest_path"] is not None
+    assert payload["pipeline"]["features"][0]["sample_cache_manifest_path"] is not None
     assert Path(payload["pipeline"]["pipeline_manifest_path"]).exists()
 
 
@@ -612,6 +614,7 @@ def test_cli_download_run_baseline_auto_downloads_crome(monkeypatch, tmp_path: P
     assert payload["reference_download"]["reference_path"] == str(extracted_reference)
     assert payload["pipeline"]["feature_count"] == 1
     assert payload["pipeline"]["sample_cache_root"] is not None
+    assert len(payload["pipeline"]["features"]) == 1
 
 
 def test_cli_download_run_baseline_retries_with_extracted_reference(
@@ -669,17 +672,32 @@ def test_cli_download_run_baseline_retries_with_extracted_reference(
         if Path(kwargs["reference_path"]) == normalized_reference:
             raise ValueError("Reference source does not expose any non-null labels.")
         return SimpleNamespace(
-            feature_results=(SimpleNamespace(),),
+            feature_results=(
+                SimpleNamespace(
+                    feature_id="alphaearth_downloaded",
+                    feature_raster_path=feature_raster,
+                    label_mapping_path=output_root / "labels.json",
+                    label_raster_path=output_root / "labels.tif",
+                    metrics_path=output_root / "metrics.json",
+                    model_path=output_root / "model.pkl",
+                    prediction_metadata_path=output_root / "prediction.json",
+                    prediction_output_root=output_root / "prediction",
+                    prediction_raster_path=output_root / "prediction.tif",
+                    qc_manifest_path=output_root / "feature_qc.json",
+                    sample_cache_manifest_path=output_root / "sample_cache_manifest.json",
+                    sample_cache_root=output_root / "cache",
+                    source_image_id="IMAGE_DOWNLOADED",
+                    tile_id="IMAGE_DOWNLOADED",
+                    training_metadata_path=output_root / "training.json",
+                    training_output_root=output_root / "training",
+                    training_table_path=output_root / "training.pkl",
+                ),
+            ),
             manifest_path=manifest_path,
-            metrics_path=output_root / "metrics.json",
-            model_path=output_root / "model.pkl",
             pipeline_manifest_path=output_root / "pipeline.json",
             qc_manifest_path=output_root / "qc.json",
             skipped_features=(),
-            sample_cache_manifest_path=output_root / "sample_cache_manifest.json",
             sample_cache_root=output_root / "cache",
-            training_metadata_path=output_root / "training.json",
-            training_table_path=output_root / "training.pkl",
         )
 
     monkeypatch.setattr(cli.workflow, "download_alphaearth_images", fake_alphaearth_download)
@@ -708,6 +726,7 @@ def test_cli_download_run_baseline_retries_with_extracted_reference(
     payload = json.loads(capsys.readouterr().out)
     assert payload["reference_download"]["reference_path"] == str(normalized_reference)
     assert payload["pipeline"]["feature_count"] == 1
+    assert payload["pipeline"]["features"][0]["tile_id"] == "IMAGE_DOWNLOADED"
 
 
 def test_python_module_cli_executes_main(tmp_path: Path) -> None:

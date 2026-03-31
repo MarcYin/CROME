@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import rasterio
+from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
@@ -683,8 +684,6 @@ def train_random_forest(
         raise ValueError("Training table is empty.")
 
     class_counts = y.value_counts().sort_index()
-    if len(class_counts) < 2:
-        raise ValueError("Need at least two classes to train a classifier.")
 
     evaluation_mode = "pixel_holdout"
     evaluation_note = (
@@ -699,26 +698,55 @@ def train_random_forest(
         if "feature_id" in table.columns and table["feature_id"].nunique() > 1
         else None
     )
-    can_pixel_hold_out = (
-        0.0 < test_size < 1.0
-        and int(class_counts.min()) >= 2
-        and int(np.ceil(len(y) * test_size)) >= len(class_counts)
-    )
-    if feature_groups is not None and 0.0 < test_size < 1.0:
-        splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
-        train_idx, test_idx = next(splitter.split(X, y, groups=feature_groups))
-        X_train = X.iloc[train_idx]
-        y_train = y.iloc[train_idx]
-        X_test = X.iloc[test_idx]
-        y_test = y.iloc[test_idx]
-        if y_train.nunique() >= 2 and not X_test.empty:
-            evaluation_mode = "feature_holdout"
-            evaluation_note = (
-                "Holdout metrics are computed by holding out whole native AlphaEarth feature rasters "
-                "grouped by feature_id."
-            )
-            train_feature_ids = sorted(str(value) for value in table.iloc[train_idx]["feature_id"].unique())
-            test_feature_ids = sorted(str(value) for value in table.iloc[test_idx]["feature_id"].unique())
+    if len(class_counts) < 2:
+        X_train = X
+        y_train = y
+        X_test = None
+        y_test = None
+        evaluation_mode = "train_only_single_class"
+        evaluation_note = (
+            "Model fitted on the full training table because this tile exposes only one labeled class."
+        )
+        model = DummyClassifier(strategy="most_frequent")
+    else:
+        can_pixel_hold_out = (
+            0.0 < test_size < 1.0
+            and int(class_counts.min()) >= 2
+            and int(np.ceil(len(y) * test_size)) >= len(class_counts)
+        )
+        if feature_groups is not None and 0.0 < test_size < 1.0:
+            splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
+            train_idx, test_idx = next(splitter.split(X, y, groups=feature_groups))
+            X_train = X.iloc[train_idx]
+            y_train = y.iloc[train_idx]
+            X_test = X.iloc[test_idx]
+            y_test = y.iloc[test_idx]
+            if y_train.nunique() >= 2 and not X_test.empty:
+                evaluation_mode = "feature_holdout"
+                evaluation_note = (
+                    "Holdout metrics are computed by holding out whole native AlphaEarth feature rasters "
+                    "grouped by feature_id."
+                )
+                train_feature_ids = sorted(str(value) for value in table.iloc[train_idx]["feature_id"].unique())
+                test_feature_ids = sorted(str(value) for value in table.iloc[test_idx]["feature_id"].unique())
+            elif can_pixel_hold_out:
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X,
+                    y,
+                    test_size=test_size,
+                    random_state=random_state,
+                    stratify=y,
+                )
+            else:
+                X_train = X
+                y_train = y
+                X_test = None
+                y_test = None
+                evaluation_mode = "train_only_no_holdout"
+                evaluation_note = (
+                    "Model fitted on the full training table because neither feature-level nor pixel-level "
+                    "holdout was valid for the available class counts."
+                )
         elif can_pixel_hold_out:
             X_train, X_test, y_train, y_test = train_test_split(
                 X,
@@ -734,33 +762,15 @@ def train_random_forest(
             y_test = None
             evaluation_mode = "train_only_no_holdout"
             evaluation_note = (
-                "Model fitted on the full training table because neither feature-level nor pixel-level "
-                "holdout was valid for the available class counts."
+                "Model fitted on the full training table because the requested holdout split was not "
+                "valid for the available class counts."
             )
-    elif can_pixel_hold_out:
-        X_train, X_test, y_train, y_test = train_test_split(
-            X,
-            y,
-            test_size=test_size,
-            random_state=random_state,
-            stratify=y,
-        )
-    else:
-        X_train = X
-        y_train = y
-        X_test = None
-        y_test = None
-        evaluation_mode = "train_only_no_holdout"
-        evaluation_note = (
-            "Model fitted on the full training table because the requested holdout split was not "
-            "valid for the available class counts."
-        )
 
-    model = RandomForestClassifier(
-        n_estimators=n_estimators,
-        random_state=random_state,
-        n_jobs=-1,
-    )
+        model = RandomForestClassifier(
+            n_estimators=n_estimators,
+            random_state=random_state,
+            n_jobs=-1,
+        )
     model.fit(X_train, y_train)
     if X_test is not None and y_test is not None:
         y_pred = model.predict(X_test)

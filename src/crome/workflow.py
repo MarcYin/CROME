@@ -41,20 +41,51 @@ def _warn_if_conditional_year(request: AlphaEarthDownloadRequest) -> None:
 def _pipeline_result_to_dict(result: BaselinePipelineResult) -> dict[str, Any]:
     return {
         "feature_count": len(result.feature_results),
+        "features": [
+            {
+                "feature_id": feature.feature_id,
+                "feature_raster_path": str(feature.feature_raster_path),
+                "label_mapping_path": str(feature.label_mapping_path),
+                "label_raster_path": str(feature.label_raster_path),
+                "metrics_path": str(feature.metrics_path),
+                "model_path": str(feature.model_path),
+                "prediction_metadata_path": (
+                    str(feature.prediction_metadata_path)
+                    if feature.prediction_metadata_path is not None
+                    else None
+                ),
+                "prediction_output_root": (
+                    str(feature.prediction_output_root)
+                    if feature.prediction_output_root is not None
+                    else None
+                ),
+                "prediction_raster_path": (
+                    str(feature.prediction_raster_path)
+                    if feature.prediction_raster_path is not None
+                    else None
+                ),
+                "qc_manifest_path": str(feature.qc_manifest_path),
+                "sample_cache_manifest_path": (
+                    str(feature.sample_cache_manifest_path)
+                    if feature.sample_cache_manifest_path is not None
+                    else None
+                ),
+                "sample_cache_root": (
+                    str(feature.sample_cache_root) if feature.sample_cache_root is not None else None
+                ),
+                "source_image_id": feature.source_image_id,
+                "tile_id": feature.tile_id,
+                "training_metadata_path": str(feature.training_metadata_path),
+                "training_output_root": str(feature.training_output_root),
+                "training_table_path": str(feature.training_table_path),
+            }
+            for feature in result.feature_results
+        ],
         "manifest_path": str(result.manifest_path) if result.manifest_path is not None else None,
-        "metrics_path": str(result.metrics_path),
-        "model_path": str(result.model_path),
         "pipeline_manifest_path": str(result.pipeline_manifest_path),
         "qc_manifest_path": str(result.qc_manifest_path),
         "skipped_feature_count": len(result.skipped_features),
-        "sample_cache_manifest_path": (
-            str(result.sample_cache_manifest_path) if result.sample_cache_manifest_path is not None else None
-        ),
-        "sample_cache_root": (
-            str(result.sample_cache_root) if result.sample_cache_root is not None else None
-        ),
-        "training_metadata_path": str(result.training_metadata_path),
-        "training_table_path": str(result.training_table_path),
+        "sample_cache_root": str(result.sample_cache_root) if result.sample_cache_root is not None else None,
     }
 
 
@@ -191,7 +222,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--aoi-label",
         default=None,
-        help="Optional run label used only in local naming. This is not an AlphaEarth tile identifier.",
+        help=(
+            "Optional download or batch-summary label. Downstream labels, training artifacts, models, "
+            "and predictions are keyed by discovered AlphaEarth feature tiles."
+        ),
     )
     parser.add_argument(
         "--output-root",
@@ -300,6 +334,7 @@ def main(argv: list[str] | None = None) -> int:
             "pipeline": {
                 "all_touched": args.all_touched,
                 "aoi_label": request.aoi_label,
+                "artifact_unit": "alphaearth_feature_tile",
                 "fail_on_empty_labels": args.fail_on_empty_labels,
                 "geometry_column": args.geometry_column,
                 "label_mode": args.label_mode,

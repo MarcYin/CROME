@@ -39,6 +39,20 @@ def feature_artifact_name(feature_raster_path: Path | str) -> str:
     return sanitize_label(Path(feature_raster_path).stem, default="feature")
 
 
+def feature_tile_name(
+    *,
+    feature_id: str | None = None,
+    source_image_id: str | None = None,
+    feature_raster_path: Path | str | None = None,
+) -> str:
+    """Return the canonical AlphaEarth tile label for one discovered feature."""
+
+    raw = source_image_id or feature_id
+    if raw is None and feature_raster_path is not None:
+        raw = Path(feature_raster_path).stem
+    return sanitize_label(raw, default="tile")
+
+
 def alphaearth_run_name(aoi_label: str | None, year: int) -> str:
     """Return the stable run directory name for one AlphaEarth AOI/year run."""
 
@@ -150,11 +164,40 @@ def training_output_root(base_output_root: Path | str, aoi_label: str | None, ye
 
     return Path(base_output_root) / "training" / f"TRAIN_{sanitize_label(aoi_label)}_{year}"
 
-
 def prediction_output_root(base_output_root: Path | str, aoi_label: str | None, year: int) -> Path:
     """Return the prediction-artifact output directory for one AOI/year run."""
 
     return Path(base_output_root) / "prediction" / f"PRED_{sanitize_label(aoi_label)}_{year}"
+
+
+def reference_tile_output_root(
+    base_output_root: Path | str,
+    tile_label: str | None,
+    year: int,
+    *,
+    reference_name: str = "crome_hex",
+) -> Path:
+    """Return the reference-label output directory for one AlphaEarth tile/year run."""
+
+    return (
+        Path(base_output_root)
+        / "reference"
+        / sanitize_label(reference_name, default="reference")
+        / "tiles"
+        / reference_run_name(tile_label, year, reference_name=reference_name)
+    )
+
+
+def training_tile_output_root(base_output_root: Path | str, tile_label: str | None, year: int) -> Path:
+    """Return the training-artifact output directory for one AlphaEarth tile/year run."""
+
+    return Path(base_output_root) / "training" / "tiles" / f"TRAIN_{sanitize_label(tile_label)}_{year}"
+
+
+def prediction_tile_output_root(base_output_root: Path | str, tile_label: str | None, year: int) -> Path:
+    """Return the prediction-artifact output directory for one AlphaEarth tile/year run."""
+
+    return Path(base_output_root) / "prediction" / "tiles" / f"PRED_{sanitize_label(tile_label)}_{year}"
 
 
 def sample_cache_root(
