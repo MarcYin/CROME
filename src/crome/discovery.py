@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .features import read_feature_raster_spec
-from .paths import feature_artifact_name
+from .paths import feature_artifact_name, feature_tile_name
 
 _MANIFEST_PATH_KEYS = (
     "path",
@@ -265,3 +267,96 @@ def discover_feature_rasters(
         )
 
     return tuple(sorted(discovered.values(), key=lambda item: (item.feature_id, str(item.raster_path))))
+
+
+def discovered_feature_payload(
+    *,
+    feature_input: Path | str | None = None,
+    manifest_path: Path | str | None = None,
+) -> list[dict[str, str | None]]:
+    """Return discovered feature rasters as JSON/TSV-friendly records."""
+
+    payload: list[dict[str, str | None]] = []
+    for record in discover_feature_rasters(feature_input=feature_input, manifest_path=manifest_path):
+        payload.append(
+            {
+                "feature_id": record.feature_id,
+                "tile_id": feature_tile_name(
+                    feature_id=record.feature_id,
+                    source_image_id=record.source_image_id,
+                    feature_raster_path=record.raster_path,
+                ),
+                "source_image_id": record.source_image_id,
+                "raster_path": str(record.raster_path),
+            }
+        )
+    return payload
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="List discovered AlphaEarth feature rasters from a manifest or feature-input root."
+    )
+    parser.add_argument(
+        "--feature-input",
+        default=None,
+        help="Path to one AlphaEarth feature raster or a directory tree containing GeoTIFFs.",
+    )
+    parser.add_argument(
+        "--manifest-path",
+        default=None,
+        help="Path to an edown manifest; discovery falls back to the manifest directory.",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("json", "jsonl", "tsv"),
+        default="json",
+        help="Output format for discovered features.",
+    )
+    parser.add_argument(
+        "--output-path",
+        default=None,
+        help="Optional file path for the rendered discovery payload.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.feature_input is None and args.manifest_path is None:
+        parser.error("Provide at least one of --feature-input or --manifest-path.")
+    payload = discovered_feature_payload(
+        feature_input=args.feature_input,
+        manifest_path=args.manifest_path,
+    )
+    rendered = ""
+    if args.format == "tsv":
+        rendered = "feature_id\ttile_id\tsource_image_id\traster_path\n"
+        for item in payload:
+            rendered += (
+                "\t".join(
+                    (
+                        item["feature_id"] or "",
+                        item["tile_id"] or "",
+                        item["source_image_id"] or "",
+                        item["raster_path"] or "",
+                    )
+                )
+                + "\n"
+            )
+    elif args.format == "jsonl":
+        rendered = "\n".join(json.dumps(item, sort_keys=True) for item in payload)
+        if rendered:
+            rendered += "\n"
+    else:
+        rendered = json.dumps({"feature_count": len(payload), "features": payload}, indent=2, sort_keys=True)
+        rendered += "\n"
+    if args.output_path is not None:
+        Path(args.output_path).write_text(rendered, encoding="utf-8")
+    sys.stdout.write(rendered)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

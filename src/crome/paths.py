@@ -177,6 +177,21 @@ def training_output_root(
     return root / f"TRAIN_{sanitize_label(aoi_label)}_{year}"
 
 
+def pooled_training_output_root(
+    base_output_root: Path | str,
+    batch_label: str | None,
+    year: int,
+    *,
+    namespace: str | None = None,
+) -> Path:
+    """Return the pooled-model output directory for one tile batch/year run."""
+
+    root = Path(base_output_root) / "training" / "pooled"
+    if namespace is not None:
+        root = root / sanitize_label(namespace, default="default")
+    return root / f"POOL_{sanitize_label(batch_label)}_{year}"
+
+
 def prediction_output_root(
     base_output_root: Path | str,
     aoi_label: str | None,
@@ -263,3 +278,18 @@ def sample_cache_root(
     if cache_label is None:
         return root
     return root / sanitize_label(cache_label, default="default")
+
+
+def workflow_batch_output_root(
+    base_output_root: Path | str,
+    batch_label: str | None,
+    year: int,
+    *,
+    namespace: str | None = None,
+) -> Path:
+    """Return the workflow-planning directory for one tile batch/year run."""
+
+    root = Path(base_output_root) / "workflow"
+    if namespace is not None:
+        root = root / sanitize_label(namespace, default="default")
+    return root / f"BATCH_{sanitize_label(batch_label)}_{year}"

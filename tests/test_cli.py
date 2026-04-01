@@ -419,6 +419,42 @@ def test_cli_run_baseline_pipeline_from_manifest(tmp_path: Path, capsys) -> None
     assert Path(payload["pipeline_manifest_path"]).exists()
 
 
+def test_cli_list_feature_rasters_from_manifest(tmp_path: Path, capsys) -> None:
+    feature_dir = tmp_path / "raw"
+    feature_dir.mkdir()
+    first_raster = feature_dir / "alphaearth_a.tif"
+    second_raster = feature_dir / "alphaearth_b.tif"
+    manifest_path = feature_dir / "manifests" / "run.json"
+    _write_feature_raster(first_raster)
+    _write_feature_raster(second_raster)
+    _write_manifest(
+        manifest_path,
+        [
+            ("IMAGE_A", first_raster),
+            ("IMAGE_B", second_raster),
+        ],
+    )
+
+    exit_code = cli.main(
+        [
+            "list-feature-rasters",
+            "--manifest-path",
+            str(manifest_path),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["feature_count"] == 2
+    assert {item["tile_id"] for item in payload["features"]} == {"IMAGE_A", "IMAGE_B"}
+    assert {Path(item["raster_path"]).name for item in payload["features"]} == {
+        "alphaearth_a.tif",
+        "alphaearth_b.tif",
+    }
+
+
 def test_cli_build_training_table_from_cache(tmp_path: Path, capsys) -> None:
     feature_raster = tmp_path / "alphaearth.tif"
     reference_geojson = tmp_path / "crome.geojson"
@@ -564,6 +600,73 @@ def test_cli_train_pooled_model_from_pipeline_manifests(tmp_path: Path, capsys) 
     metrics = json.loads(Path(payload["metrics_path"]).read_text(encoding="utf-8"))
     assert metrics["evaluation_mode"] == "feature_holdout"
     assert metrics["training_subsample"]["max_train_rows"] == 3
+
+
+def test_cli_prepare_tile_batch_and_train_from_tile_results(tmp_path: Path, capsys) -> None:
+    feature_dir = tmp_path / "raw"
+    feature_dir.mkdir()
+    reference_geojson = tmp_path / "crome.geojson"
+    output_root = tmp_path / "outputs"
+    manifest_path = feature_dir / "manifests" / "run.json"
+    first_raster = feature_dir / "alphaearth_a.tif"
+    second_raster = feature_dir / "alphaearth_b.tif"
+    _write_feature_raster(first_raster)
+    _write_feature_raster(second_raster)
+    _write_reference_geojson(reference_geojson)
+    _write_manifest(
+        manifest_path,
+        [
+            ("IMAGE_A", first_raster),
+            ("IMAGE_B", second_raster),
+        ],
+    )
+
+    assert (
+        cli.main(
+            [
+                "prepare-tile-batch",
+                "--manifest-path",
+                str(manifest_path),
+                "--reference-path",
+                str(reference_geojson),
+                "--year",
+                "2024",
+                "--output-root",
+                str(output_root),
+                "--aoi-label",
+                "batch-run",
+                "--no-predict",
+            ]
+        )
+        == 0
+    )
+    batch_payload = json.loads(capsys.readouterr().out)
+    assert batch_payload["tile_count"] == 2
+    assert Path(batch_payload["batch_manifest_path"]).exists()
+
+    tile_result_paths: list[Path] = []
+    for tile_manifest_path in batch_payload["tile_manifest_paths"]:
+        assert cli.main(["run-tile-plan", "--tile-plan", tile_manifest_path]) == 0
+        tile_result_path = tmp_path / f"{Path(tile_manifest_path).stem}_result.json"
+        tile_result_path.write_text(capsys.readouterr().out, encoding="utf-8")
+        tile_result_payload = json.loads(tile_result_path.read_text(encoding="utf-8"))
+        assert tile_result_payload["feature_count"] == 1
+        tile_result_paths.append(tile_result_path)
+
+    pooled_args = [
+        "train-pooled-from-tile-results",
+        "--batch-manifest",
+        batch_payload["batch_manifest_path"],
+    ]
+    for tile_result_path in tile_result_paths:
+        pooled_args.extend(["--tile-result", str(tile_result_path)])
+
+    assert cli.main(pooled_args) == 0
+    pooled_payload = json.loads(capsys.readouterr().out)
+    assert Path(pooled_payload["metrics_path"]).exists()
+    assert Path(pooled_payload["model_path"]).exists()
+    assert Path(pooled_payload["pooled_manifest_path"]).exists()
+    assert len(pooled_payload["pipeline_manifest_paths"]) == 2
 
 
 def test_cli_download_run_baseline(monkeypatch, tmp_path: Path, capsys) -> None:

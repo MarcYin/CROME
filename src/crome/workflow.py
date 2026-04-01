@@ -149,6 +149,8 @@ def download_and_run_baseline(
     test_size: float = 0.2,
     random_state: int = 42,
     n_estimators: int = 200,
+    n_jobs: int = -1,
+    max_train_rows: int | None = None,
     predict: bool = True,
     skip_empty_labels: bool = True,
 ) -> DownloadBaselineResult:
@@ -192,6 +194,8 @@ def download_and_run_baseline(
         "test_size": test_size,
         "random_state": random_state,
         "n_estimators": n_estimators,
+        "n_jobs": n_jobs,
+        "max_train_rows": max_train_rows,
         "predict": predict,
         "skip_empty_labels": skip_empty_labels,
     }
@@ -295,6 +299,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--random-state", type=int, default=42, help="Random seed.")
     parser.add_argument("--n-estimators", type=int, default=200, help="Random forest tree count.")
     parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=-1,
+        help="CPU parallelism passed to RandomForestClassifier for each tile-local model fit.",
+    )
+    parser.add_argument(
+        "--max-train-rows",
+        type=int,
+        default=None,
+        help="Optional cap on tile-local training rows after holdout splitting.",
+    )
+    parser.add_argument(
         "--fail-on-empty-labels",
         action="store_true",
         help="Fail instead of skipping feature rasters that have no usable CROME coverage.",
@@ -348,6 +364,8 @@ def main(argv: list[str] | None = None) -> int:
                 "label_mode": args.label_mode,
                 "label_column": args.label_column,
                 "n_estimators": args.n_estimators,
+                "n_jobs": args.n_jobs,
+                "max_train_rows": args.max_train_rows,
                 "no_predict": args.no_predict,
                 "nodata_label": args.nodata_label,
                 "output_root": str(request.output_root),
@@ -380,6 +398,8 @@ def main(argv: list[str] | None = None) -> int:
         test_size=args.test_size,
         random_state=args.random_state,
         n_estimators=args.n_estimators,
+        n_jobs=args.n_jobs,
+        max_train_rows=args.max_train_rows,
         predict=not args.no_predict,
         skip_empty_labels=not args.fail_on_empty_labels,
     )

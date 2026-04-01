@@ -6,7 +6,7 @@ import argparse
 import sys
 
 from crome.acquisition import alphaearth, crome
-from crome import labeling, pipeline, predict, training, workflow
+from crome import discovery, labeling, orchestration, pipeline, predict, training, workflow
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +27,29 @@ def build_parser() -> argparse.ArgumentParser:
         "download-crome",
         help=crome_help,
         parents=[crome_parser],
+        add_help=False,
+    )
+    crome_subset_parser = crome.build_subset_parser()
+    subparsers.add_parser(
+        "prepare-crome-subset",
+        help=(
+            crome_subset_parser.description
+            or "Materialize or reuse one AOI-specific CROME subset for discovered AlphaEarth tiles."
+        ),
+        parents=[crome_subset_parser],
+        add_help=False,
+    )
+    discovery_parser = discovery.build_parser()
+    subparsers.add_parser(
+        "list-feature-rasters",
+        help=discovery_parser.description or "List discovered AlphaEarth feature rasters.",
+        parents=[discovery_parser],
+        add_help=False,
+    )
+    subparsers.add_parser(
+        "discover-feature-rasters",
+        help=discovery_parser.description or "List discovered AlphaEarth feature rasters.",
+        parents=[discovery_parser],
         add_help=False,
     )
     rasterize_parser = labeling.build_parser()
@@ -88,6 +111,30 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[workflow_parser],
         add_help=False,
     )
+    prepare_tile_batch_parser = orchestration.build_prepare_tile_batch_parser()
+    subparsers.add_parser(
+        "prepare-tile-batch",
+        help=prepare_tile_batch_parser.description or "Prepare one cluster-parallel tile batch.",
+        parents=[prepare_tile_batch_parser],
+        add_help=False,
+    )
+    run_tile_plan_parser = orchestration.build_run_tile_plan_parser()
+    subparsers.add_parser(
+        "run-tile-plan",
+        help=run_tile_plan_parser.description or "Run one prepared per-tile plan.",
+        parents=[run_tile_plan_parser],
+        add_help=False,
+    )
+    pooled_from_tile_results_parser = orchestration.build_train_pooled_from_tile_results_parser()
+    subparsers.add_parser(
+        "train-pooled-from-tile-results",
+        help=(
+            pooled_from_tile_results_parser.description
+            or "Train one pooled model from prepared tile result JSON payloads."
+        ),
+        parents=[pooled_from_tile_results_parser],
+        add_help=False,
+    )
     return parser
 
 
@@ -99,6 +146,12 @@ def main(argv: list[str] | None = None) -> int:
         return alphaearth.main(forwarded)
     if args.command == "download-crome":
         return crome.main(forwarded)
+    if args.command == "prepare-crome-subset":
+        return crome.main_prepare_subset(forwarded)
+    if args.command == "list-feature-rasters":
+        return discovery.main(forwarded)
+    if args.command == "discover-feature-rasters":
+        return discovery.main(forwarded)
     if args.command == "rasterize-reference":
         return labeling.main(forwarded)
     if args.command == "build-training-table":
@@ -115,6 +168,12 @@ def main(argv: list[str] | None = None) -> int:
         return pipeline.main(forwarded)
     if args.command == "download-run-baseline":
         return workflow.main(forwarded)
+    if args.command == "prepare-tile-batch":
+        return orchestration.main_prepare_tile_batch(forwarded)
+    if args.command == "run-tile-plan":
+        return orchestration.main_run_tile_plan(forwarded)
+    if args.command == "train-pooled-from-tile-results":
+        return orchestration.main_train_pooled_from_tile_results(forwarded)
     raise ValueError(f"Unsupported command: {args.command}")
 
 

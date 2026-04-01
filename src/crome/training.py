@@ -777,6 +777,7 @@ def train_pooled_model_from_pipeline_manifests(
     test_size: float = 0.2,
     random_state: int = 42,
     n_estimators: int = 200,
+    n_jobs: int = -1,
     max_train_rows: int | None = None,
 ) -> PooledTrainingResult:
     """Build and train one pooled model from prior batch pipeline manifests."""
@@ -805,6 +806,7 @@ def train_pooled_model_from_pipeline_manifests(
         test_size=test_size,
         random_state=random_state,
         n_estimators=n_estimators,
+        n_jobs=n_jobs,
         max_train_rows=max_train_rows,
         label_mapping_path=dataset_label_mapping_path if dataset_label_mapping_path.exists() else None,
     )
@@ -819,6 +821,7 @@ def train_pooled_model_from_pipeline_manifests(
                 "model_parameters": {
                     "max_train_rows": max_train_rows,
                     "n_estimators": n_estimators,
+                    "n_jobs": n_jobs,
                     "random_state": random_state,
                     "test_size": test_size,
                 },
@@ -864,6 +867,7 @@ def train_random_forest(
     test_size: float = 0.2,
     random_state: int = 42,
     n_estimators: int = 200,
+    n_jobs: int = -1,
     max_train_rows: int | None = None,
     label_mapping_path: Path | str | None = None,
 ) -> TrainedModelResult:
@@ -883,6 +887,8 @@ def train_random_forest(
 
     if table.empty:
         raise ValueError("Training table is empty.")
+    if n_jobs == 0:
+        raise ValueError("n_jobs must be non-zero.")
 
     all_indices = np.arange(len(table))
     y = table[label_column]
@@ -961,7 +967,7 @@ def train_random_forest(
         model = RandomForestClassifier(
             n_estimators=n_estimators,
             random_state=random_state,
-            n_jobs=-1,
+            n_jobs=n_jobs,
         )
     pre_subsample_train_row_count = int(len(train_idx))
     if max_train_rows is not None and max_train_rows <= 0:
@@ -1101,6 +1107,8 @@ def train_random_forest(
         "label_mapping": label_mapping,
         "macro_f1": macro_f1,
         "model_type": "RandomForestClassifier",
+        "n_estimators": n_estimators,
+        "n_jobs": n_jobs,
         "pre_subsample_train_row_count": pre_subsample_train_row_count,
         "row_count": int(table.shape[0]),
         "test_feature_ids": test_feature_ids,
@@ -1154,6 +1162,12 @@ def build_train_model_parser() -> argparse.ArgumentParser:
     parser.add_argument("--random-state", type=int, default=42, help="Random seed.")
     parser.add_argument("--n-estimators", type=int, default=200, help="Random forest tree count.")
     parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=-1,
+        help="CPU parallelism passed to RandomForestClassifier. Use the allocated Slurm CPUs for cluster runs.",
+    )
+    parser.add_argument(
         "--max-train-rows",
         type=int,
         default=None,
@@ -1197,6 +1211,12 @@ def build_train_pooled_model_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-size", type=float, default=0.2, help="Evaluation holdout fraction.")
     parser.add_argument("--random-state", type=int, default=42, help="Random seed.")
     parser.add_argument("--n-estimators", type=int, default=200, help="Random forest tree count.")
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=-1,
+        help="CPU parallelism passed to RandomForestClassifier for the pooled model fit.",
+    )
     parser.add_argument(
         "--max-train-rows",
         type=int,
@@ -1276,6 +1296,7 @@ def main_train_pooled_model(argv: list[str] | None = None) -> int:
         test_size=args.test_size,
         random_state=args.random_state,
         n_estimators=args.n_estimators,
+        n_jobs=args.n_jobs,
         max_train_rows=args.max_train_rows,
     )
     print(
@@ -1307,6 +1328,7 @@ def main_train_model(argv: list[str] | None = None) -> int:
         test_size=args.test_size,
         random_state=args.random_state,
         n_estimators=args.n_estimators,
+        n_jobs=args.n_jobs,
         max_train_rows=args.max_train_rows,
         label_mapping_path=args.label_mapping,
     )

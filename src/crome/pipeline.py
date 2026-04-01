@@ -341,10 +341,15 @@ def run_baseline_pipeline(
     test_size: float = 0.2,
     random_state: int = 42,
     n_estimators: int = 200,
+    n_jobs: int = -1,
+    max_train_rows: int | None = None,
     predict: bool = True,
     skip_empty_labels: bool = True,
 ) -> BaselinePipelineResult:
     """Run the baseline pipeline across one or more native AlphaEarth rasters."""
+
+    if feature_input is None and manifest_path is None:
+        raise ValueError("Provide at least one of feature_input or manifest_path.")
 
     discovered = discover_feature_rasters(feature_input=feature_input, manifest_path=manifest_path)
     spec = _build_training_spec(
@@ -488,6 +493,8 @@ def run_baseline_pipeline(
             test_size=test_size,
             random_state=random_state,
             n_estimators=n_estimators,
+            n_jobs=n_jobs,
+            max_train_rows=max_train_rows,
             label_mapping_path=rasterized.label_mapping_path,
         )
         prediction_output_dir = (
@@ -651,6 +658,9 @@ def run_baseline_pipeline(
         "features": [_feature_result_payload(feature) for feature in processed_features],
         "manifest_path": str(manifest_path) if manifest_path is not None else None,
         "label_mode": spec.label_mode,
+        "max_train_rows": max_train_rows,
+        "n_estimators": n_estimators,
+        "n_jobs": n_jobs,
         "qc_manifest_path": str(qc_manifest_path),
         "reference_input_path": str(Path(reference_path)),
         "reference_manifest_path": (
@@ -674,6 +684,7 @@ def run_baseline_pipeline(
             }
             for feature in skipped_features
         ],
+        "test_size": test_size,
         "year": year,
     }
     pipeline_manifest_path.write_text(
@@ -698,8 +709,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the baseline AlphaEarth-to-CROME pipeline over one or more native rasters."
     )
-    input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument(
+    parser.add_argument(
         "--feature-input",
         default=None,
         help=(
@@ -707,10 +717,10 @@ def build_parser() -> argparse.ArgumentParser:
             "GeoTIFFs."
         ),
     )
-    input_group.add_argument(
+    parser.add_argument(
         "--manifest-path",
         default=None,
-        help="Path to an edown manifest; raster discovery falls back to the manifest directory.",
+        help="Optional edown manifest; raster discovery falls back to the manifest directory.",
     )
     parser.add_argument("--reference-path", required=True, help="Path to the CROME vector reference file.")
     parser.add_argument("--year", required=True, type=int, help="Reference year.")
@@ -754,6 +764,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--random-state", type=int, default=42, help="Random seed.")
     parser.add_argument("--n-estimators", type=int, default=200, help="Random forest tree count.")
     parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=-1,
+        help="CPU parallelism passed to RandomForestClassifier for each tile-local model fit.",
+    )
+    parser.add_argument(
+        "--max-train-rows",
+        type=int,
+        default=None,
+        help="Optional cap on tile-local training rows after holdout splitting.",
+    )
+    parser.add_argument(
         "--fail-on-empty-labels",
         action="store_true",
         help="Fail instead of skipping feature rasters that have no usable CROME coverage.",
@@ -769,6 +791,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.feature_input is None and args.manifest_path is None:
+        parser.error("Provide at least one of --feature-input or --manifest-path.")
     result = run_baseline_pipeline(
         feature_input=args.feature_input,
         manifest_path=args.manifest_path,
@@ -785,6 +809,8 @@ def main(argv: list[str] | None = None) -> int:
         test_size=args.test_size,
         random_state=args.random_state,
         n_estimators=args.n_estimators,
+        n_jobs=args.n_jobs,
+        max_train_rows=args.max_train_rows,
         predict=not args.no_predict,
         skip_empty_labels=not args.fail_on_empty_labels,
     )
@@ -792,6 +818,9 @@ def main(argv: list[str] | None = None) -> int:
         "feature_count": len(result.feature_results),
         "features": [_feature_result_payload(feature) for feature in result.feature_results],
         "manifest_path": str(result.manifest_path) if result.manifest_path is not None else None,
+        "max_train_rows": args.max_train_rows,
+        "n_estimators": args.n_estimators,
+        "n_jobs": args.n_jobs,
         "pipeline_manifest_path": str(result.pipeline_manifest_path),
         "qc_manifest_path": str(result.qc_manifest_path),
         "reference_input_path": str(result.reference_input_path),
@@ -801,6 +830,7 @@ def main(argv: list[str] | None = None) -> int:
         "reference_path": str(result.reference_path),
         "skipped_feature_count": len(result.skipped_features),
         "sample_cache_root": str(result.sample_cache_root) if result.sample_cache_root is not None else None,
+        "test_size": args.test_size,
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0

@@ -6,3 +6,4 @@ theme:
 nav:
   - Home: index.md
   - Migration: migration.md
+  - Nextflow: nextflow.md

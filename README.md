@@ -79,6 +79,7 @@ crome build-training-table-from-cache \
   --cache-manifest ./outputs/training/tiles/<model-namespace>/TRAIN_IMAGE_FULL_2024/dataset/sample_cache_manifest.json \
   --cache-manifest ./outputs/training/tiles/<model-namespace>/TRAIN_IMAGE_LEFT_2024/dataset/sample_cache_manifest.json \
   --output-dir ./outputs/training/global-2024
+crome list-feature-rasters --manifest-path ./outputs/raw/alphaearth/<run>/manifests/run.json --format tsv
 crome train-pooled-model \
   --pipeline-manifest ./outputs/training/<model-namespace>/TRAIN_RUN_A_2024/pipeline.json \
   --pipeline-manifest ./outputs/training/<model-namespace>/TRAIN_RUN_B_2024/pipeline.json \
@@ -89,6 +90,41 @@ crome train-pooled-model \
 The tile namespaces are derived from the label-transfer mode, reference settings, and model/training configuration so repeated runs against the same AlphaEarth image tiles do not overwrite each other.
 For very large pooled tables, `crome train-model` also accepts `--max-train-rows` so global fits can cap the training subset after the holdout split while still evaluating on the full held-out tiles.
 `crome train-pooled-model` wraps the pooled path end to end by reading prior `pipeline.json` files, gathering their cached sample manifests, building the combined table, and training the pooled model in one command.
+`crome list-feature-rasters` is the stable discovery boundary for cluster schedulers such as Nextflow: it emits `feature_id`, `tile_id`, `source_image_id`, and raster paths for one manifest or feature root.
+`crome prepare-tile-batch`, `crome run-tile-plan`, and `crome train-pooled-from-tile-results` are the stable orchestration boundary for Slurm schedulers: they prepare one tile batch from a manifest or raster root, run one tile per job without output collisions, and optionally assemble one pooled model after the tile jobs finish.
+
+## Nextflow on JASMIN
+
+The repo now includes a Slurm-oriented Nextflow wrapper under [main.nf](/home/users/marcyin/UK_crop_map/workflows/nextflow/main.nf) with queue profiles in [nextflow.config](/home/users/marcyin/UK_crop_map/workflows/nextflow/nextflow.config). The workflow assumes you prepare a batch once, then let Nextflow fan out one `crome run-tile-plan` task per AlphaEarth image tile and optionally run one pooled `crome train-pooled-from-tile-results` step after the tile jobs finish.
+
+Typical JASMIN usage:
+
+```bash
+crome prepare-tile-batch \
+  --manifest-path /gws/ssde/j25a/nceo_isp/public/CROME/raw/alphaearth/AEF_cambridge-fringe-smoke_annual_embedding_2024/manifests/run-20260330T213729Z.json \
+  --reference-path /gws/ssde/j25a/nceo_isp/public/CROME/raw/crome/CROME_2024_national/extracted/Crop_Map_of_England_CROME_2024.gpkg \
+  --output-root /gws/ssde/j25a/nceo_isp/public/CROME \
+  --year 2024 \
+  --aoi-label cambridge-norfolk-2024
+
+nextflow run workflows/nextflow/main.nf \
+  -c workflows/nextflow/nextflow.config \
+  -profile jasmin \
+  --batch_manifest /gws/ssde/j25a/nceo_isp/public/CROME/workflow/<tile-batch-namespace>/BATCH_cambridge-norfolk-2024_2024/batch_manifest.json \
+  --tile_cpus 16 \
+  --tile_memory '128 GB' \
+  --pooled_cpus 48 \
+  --pooled_memory '512 GB'
+```
+
+The current JASMIN queue guidance supports this split well: `debug` is the right smoke-test profile, `standard` plus QoS `high` is the default for multi-core per-tile jobs because it allows up to `96` CPUs per job and `1000 GB` memory, and the access-controlled `special` partition exposes `6 TB` nodes with QoS `special` up to `96` CPUs and `3000 GB` memory for uncapped pooled fits. Source: https://help.jasmin.ac.uk/docs/batch-computing/slurm-queues/
+
+Use `-profile jasmin_special` only if your account has access to the JASMIN `special` partition. The workflow keeps the scientific contract unchanged:
+
+- one task per prepared AlphaEarth image tile
+- tile-local labels, models, and predictions written by the existing `crome` CLI without batch-manifest collisions
+- pooled training assembled only from emitted per-tile `pipeline.json` manifests
+- shared sample-cache reuse preserved under the existing cache namespace layout
 
 You can set a user-specific default artifact root with:
 

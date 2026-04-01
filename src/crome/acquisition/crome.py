@@ -19,6 +19,7 @@ import pyogrio
 from rasterio.warp import transform_bounds
 
 from crome.config import CromeDownloadRequest
+from crome.discovery import discover_feature_rasters
 from crome.paths import (
     OUTPUT_ROOT_ENV_VAR,
     crome_archive_path,
@@ -937,6 +938,91 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resolve the landing page and archive URL without downloading.",
     )
     return parser
+
+
+def build_subset_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Materialize or reuse one AOI-specific CROME subset for discovered AlphaEarth tiles."
+    )
+    parser.add_argument("--reference-path", required=True, help="Path to the CROME vector reference file.")
+    parser.add_argument("--year", required=True, type=int, help="Reference year.")
+    parser.add_argument(
+        "--output-root",
+        default=default_output_root(),
+        help=(
+            "Base directory for any derived subset artifacts. "
+            f"Defaults to ${OUTPUT_ROOT_ENV_VAR} when set, otherwise data/alphaearth."
+        ),
+    )
+    parser.add_argument(
+        "--subset-label",
+        default=None,
+        help="Optional human-readable subset label. The stable runtime identity still keys off AlphaEarth tiles.",
+    )
+    parser.add_argument(
+        "--feature-input",
+        default=None,
+        help="Path to one AlphaEarth feature raster or a directory tree containing native GeoTIFFs.",
+    )
+    parser.add_argument(
+        "--manifest-path",
+        default=None,
+        help="Optional edown manifest used to resolve discovered AlphaEarth tiles.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Rebuild the subset even if a matching cached subset already exists.",
+    )
+    return parser
+
+
+def _subset_manifest_path(reference_path: Path) -> Path | None:
+    candidate = reference_path.with_suffix(".json")
+    if candidate.exists():
+        return candidate
+    nested = reference_path.parent / "manifest.json"
+    if nested.exists():
+        return nested
+    return None
+
+
+def main_prepare_subset(argv: list[str] | None = None) -> int:
+    parser = build_subset_parser()
+    args = parser.parse_args(argv)
+    if args.feature_input is None and args.manifest_path is None:
+        parser.error("Provide at least one of --feature-input or --manifest-path.")
+
+    discovered = discover_feature_rasters(
+        feature_input=args.feature_input,
+        manifest_path=args.manifest_path,
+    )
+    tile_ids = _subset_tile_ids([feature.raster_path for feature in discovered])
+    resolved_reference_path = materialize_crome_reference_subset(
+        args.reference_path,
+        feature_raster_paths=[feature.raster_path for feature in discovered],
+        subset_label=args.subset_label,
+        year=args.year,
+        force=args.force,
+    )
+    resolved_reference = Path(resolved_reference_path)
+    payload = {
+        "feature_count": len(discovered),
+        "feature_ids": [feature.feature_id for feature in discovered],
+        "manifest_path": args.manifest_path,
+        "reference_input_path": str(Path(args.reference_path)),
+        "reference_manifest_path": (
+            str(_subset_manifest_path(resolved_reference))
+            if _subset_manifest_path(resolved_reference) is not None
+            else None
+        ),
+        "reference_path": str(resolved_reference),
+        "subset_materialized": resolved_reference != Path(args.reference_path),
+        "tile_ids": list(tile_ids),
+        "year": args.year,
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
