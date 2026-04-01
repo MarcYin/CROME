@@ -25,6 +25,7 @@ from .paths import (
     prediction_tile_output_root,
     reference_tile_output_root,
     sample_cache_root,
+    training_output_root,
     training_tile_output_root,
 )
 from .predict import predict_crop_map
@@ -192,6 +193,27 @@ def _sample_cache_namespace(spec: AlphaEarthTrainingSpec) -> str:
     )
 
 
+def _tile_label_output_namespace(spec: AlphaEarthTrainingSpec) -> str:
+    return _sample_cache_namespace(spec)
+
+
+def _tile_model_output_namespace(
+    spec: AlphaEarthTrainingSpec,
+    *,
+    test_size: float,
+    random_state: int,
+    n_estimators: int,
+) -> str:
+    payload = {
+        "n_estimators": n_estimators,
+        "random_state": random_state,
+        "sample_cache_namespace": _sample_cache_namespace(spec),
+        "test_size": test_size,
+    }
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+    return f"{_sample_cache_namespace(spec)}_rf_{digest}"
+
+
 def _feature_tile_id(feature: object) -> str:
     return feature_tile_name(
         feature_id=getattr(feature, "feature_id", None),
@@ -342,12 +364,25 @@ def run_baseline_pipeline(
 
     processed_features: list[PipelineFeatureResult] = []
     skipped_features: list[SkippedFeatureResult] = []
+    label_output_namespace = _tile_label_output_namespace(spec)
+    model_output_namespace = _tile_model_output_namespace(
+        spec,
+        test_size=test_size,
+        random_state=random_state,
+        n_estimators=n_estimators,
+    )
     sample_cache_dir = sample_cache_root(
         output_root,
         year,
         cache_label=_sample_cache_namespace(spec),
         label_mode=spec.label_mode,
         reference_name=spec.reference.reference_name,
+    )
+    batch_output_dir = training_output_root(
+        output_root,
+        spec.alphaearth.aoi_label,
+        year,
+        namespace=model_output_namespace,
     )
     resolved_reference_path = materialize_crome_reference_subset(
         reference_path,
@@ -392,6 +427,7 @@ def run_baseline_pipeline(
             tile_id,
             year,
             reference_name=spec.reference.reference_name,
+            namespace=label_output_namespace,
         )
         try:
             rasterized = rasterize_crome_reference(
@@ -420,7 +456,12 @@ def run_baseline_pipeline(
             label_mapping_path=rasterized.label_mapping_path,
             source_image_id=feature.source_image_id,
         )
-        training_output_dir = training_tile_output_root(output_root, tile_id, year)
+        training_output_dir = training_tile_output_root(
+            output_root,
+            tile_id,
+            year,
+            namespace=model_output_namespace,
+        )
         training_table = build_training_table_from_pairs(
             [training_pair],
             training_output_dir / "dataset",
@@ -449,7 +490,16 @@ def run_baseline_pipeline(
             n_estimators=n_estimators,
             label_mapping_path=rasterized.label_mapping_path,
         )
-        prediction_output_dir = prediction_tile_output_root(output_root, tile_id, year) if predict else None
+        prediction_output_dir = (
+            prediction_tile_output_root(
+                output_root,
+                tile_id,
+                year,
+                namespace=model_output_namespace,
+            )
+            if predict
+            else None
+        )
         prediction_metadata_path = None
         prediction_raster_path = None
         if predict:
@@ -536,7 +586,7 @@ def run_baseline_pipeline(
 
     if not processed_features:
         raise ValueError("No discovered feature rasters produced usable CROME labels.")
-    qc_output_dir = spec.training_output_root / "qc"
+    qc_output_dir = batch_output_dir / "qc"
     qc_output_dir.mkdir(parents=True, exist_ok=True)
     qc_manifest_path = qc_output_dir / "run_qc.json"
     qc_manifest_path.write_text(
@@ -593,7 +643,7 @@ def run_baseline_pipeline(
         encoding="utf-8",
     )
 
-    pipeline_manifest_path = spec.training_output_root / "pipeline.json"
+    pipeline_manifest_path = batch_output_dir / "pipeline.json"
     pipeline_manifest_path.parent.mkdir(parents=True, exist_ok=True)
     pipeline_payload = {
         "aoi_label": spec.alphaearth.aoi_label,

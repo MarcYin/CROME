@@ -148,26 +148,48 @@ def reference_output_root(
     aoi_label: str | None,
     year: int,
     reference_name: str = "crome_hex",
+    namespace: str | None = None,
 ) -> Path:
     """Return the reference-label output directory for one AOI/year run."""
 
-    return (
+    root = (
         Path(base_output_root)
         / "reference"
         / sanitize_label(reference_name, default="reference")
-        / reference_run_name(aoi_label, year, reference_name=reference_name)
     )
+    if namespace is not None:
+        root = root / sanitize_label(namespace, default="default")
+    return root / reference_run_name(aoi_label, year, reference_name=reference_name)
 
 
-def training_output_root(base_output_root: Path | str, aoi_label: str | None, year: int) -> Path:
+def training_output_root(
+    base_output_root: Path | str,
+    aoi_label: str | None,
+    year: int,
+    *,
+    namespace: str | None = None,
+) -> Path:
     """Return the training-artifact output directory for one AOI/year run."""
 
-    return Path(base_output_root) / "training" / f"TRAIN_{sanitize_label(aoi_label)}_{year}"
+    root = Path(base_output_root) / "training"
+    if namespace is not None:
+        root = root / sanitize_label(namespace, default="default")
+    return root / f"TRAIN_{sanitize_label(aoi_label)}_{year}"
 
-def prediction_output_root(base_output_root: Path | str, aoi_label: str | None, year: int) -> Path:
+
+def prediction_output_root(
+    base_output_root: Path | str,
+    aoi_label: str | None,
+    year: int,
+    *,
+    namespace: str | None = None,
+) -> Path:
     """Return the prediction-artifact output directory for one AOI/year run."""
 
-    return Path(base_output_root) / "prediction" / f"PRED_{sanitize_label(aoi_label)}_{year}"
+    root = Path(base_output_root) / "prediction"
+    if namespace is not None:
+        root = root / sanitize_label(namespace, default="default")
+    return root / f"PRED_{sanitize_label(aoi_label)}_{year}"
 
 
 def reference_tile_output_root(
@@ -176,28 +198,49 @@ def reference_tile_output_root(
     year: int,
     *,
     reference_name: str = "crome_hex",
+    namespace: str | None = None,
 ) -> Path:
     """Return the reference-label output directory for one AlphaEarth tile/year run."""
 
-    return (
+    root = (
         Path(base_output_root)
         / "reference"
         / sanitize_label(reference_name, default="reference")
         / "tiles"
-        / reference_run_name(tile_label, year, reference_name=reference_name)
     )
+    if namespace is not None:
+        root = root / sanitize_label(namespace, default="default")
+    return root / reference_run_name(tile_label, year, reference_name=reference_name)
 
 
-def training_tile_output_root(base_output_root: Path | str, tile_label: str | None, year: int) -> Path:
+def training_tile_output_root(
+    base_output_root: Path | str,
+    tile_label: str | None,
+    year: int,
+    *,
+    namespace: str | None = None,
+) -> Path:
     """Return the training-artifact output directory for one AlphaEarth tile/year run."""
 
-    return Path(base_output_root) / "training" / "tiles" / f"TRAIN_{sanitize_label(tile_label)}_{year}"
+    root = Path(base_output_root) / "training" / "tiles"
+    if namespace is not None:
+        root = root / sanitize_label(namespace, default="default")
+    return root / f"TRAIN_{sanitize_label(tile_label)}_{year}"
 
 
-def prediction_tile_output_root(base_output_root: Path | str, tile_label: str | None, year: int) -> Path:
+def prediction_tile_output_root(
+    base_output_root: Path | str,
+    tile_label: str | None,
+    year: int,
+    *,
+    namespace: str | None = None,
+) -> Path:
     """Return the prediction-artifact output directory for one AlphaEarth tile/year run."""
 
-    return Path(base_output_root) / "prediction" / "tiles" / f"PRED_{sanitize_label(tile_label)}_{year}"
+    root = Path(base_output_root) / "prediction" / "tiles"
+    if namespace is not None:
+        root = root / sanitize_label(namespace, default="default")
+    return root / f"PRED_{sanitize_label(tile_label)}_{year}"
 
 
 def sample_cache_root(

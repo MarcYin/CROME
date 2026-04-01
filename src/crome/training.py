@@ -776,11 +776,15 @@ def train_random_forest(
         y_pred = model.predict(X_test)
         accuracy = accuracy_score(y_test, y_pred)
         classification = classification_report(y_test, y_pred, output_dict=True)
+        macro_f1 = classification.get("macro avg", {}).get("f1-score")
+        weighted_f1 = classification.get("weighted avg", {}).get("f1-score")
         training_accuracy = None
     else:
         y_pred = model.predict(X_train)
         accuracy = None
         classification = None
+        macro_f1 = None
+        weighted_f1 = None
         training_accuracy = accuracy_score(y_train, y_pred)
 
     label_mapping = None
@@ -800,12 +804,14 @@ def train_random_forest(
         ),
         "label_column": label_column,
         "label_mapping": label_mapping,
+        "macro_f1": macro_f1,
         "model_type": "RandomForestClassifier",
         "row_count": int(table.shape[0]),
         "test_feature_ids": test_feature_ids,
         "test_size": test_size,
         "train_feature_ids": train_feature_ids,
         "training_accuracy": training_accuracy,
+        "weighted_f1": weighted_f1,
     }
 
     model_path = output_dir / "model.pkl"

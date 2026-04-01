@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -115,6 +116,8 @@ class CromeSubsetResult:
     source_path: Path
     subset_label: str
     subset_path: Path
+    tile_ids: tuple[str, ...]
+    tile_set_id: str
     year: int
 
 
@@ -156,6 +159,8 @@ def subset_result_to_dict(result: CromeSubsetResult) -> dict[str, Any]:
         "source_path": str(result.source_path),
         "subset_label": result.subset_label,
         "subset_path": str(result.subset_path),
+        "tile_ids": list(result.tile_ids),
+        "tile_set_id": result.tile_set_id,
         "year": result.year,
     }
 
@@ -193,6 +198,27 @@ def _is_valid_subset(subset_path: Path) -> bool:
         return False
 
 
+def _subset_tile_ids(feature_raster_paths: Sequence[Path | str]) -> tuple[str, ...]:
+    tile_ids = sorted(
+        {
+            sanitize_label(Path(path).stem, default="tile")
+            for path in feature_raster_paths
+        }
+    )
+    if not tile_ids:
+        raise ValueError("At least one feature raster path is required to derive a subset tile identity.")
+    return tuple(tile_ids)
+
+
+def _subset_tile_set_id(tile_ids: Sequence[str], subset_label: str | None) -> str:
+    if tile_ids:
+        if len(tile_ids) == 1:
+            return f"tile_{tile_ids[0]}"
+        digest = hashlib.sha256(json.dumps(list(tile_ids), sort_keys=True).encode("utf-8")).hexdigest()[:12]
+        return f"tiles_{len(tile_ids)}_{digest}"
+    return sanitize_label(subset_label, default="aoi")
+
+
 def materialize_crome_subset(
     reference_path: Path | str,
     *,
@@ -200,6 +226,7 @@ def materialize_crome_subset(
     year: int,
     subset_bounds: tuple[float, float, float, float],
     subset_label: str | None,
+    tile_ids: Sequence[str] | None = None,
     requested_crs: str | None = None,
     source_layer: str | None = None,
     force: bool = False,
@@ -220,7 +247,11 @@ def materialize_crome_subset(
     if requested_crs is not None and isinstance(source_crs, str) and source_crs:
         source_bounds = transform_bounds(requested_crs, source_crs, *subset_bounds, densify_pts=21)
 
-    subset_name = f"{sanitize_label(source_layer or source_path.stem, default='crome')}_{sanitize_label(subset_label, default='aoi')}.fgb"
+    normalized_tile_ids = tuple(str(value) for value in (tile_ids or ()))
+    tile_set_id = _subset_tile_set_id(normalized_tile_ids, subset_label)
+    subset_name = (
+        f"{sanitize_label(source_layer or source_path.stem, default='crome')}_{tile_set_id}.fgb"
+    )
     subset_path = subset_root / subset_name
     manifest_path = subset_path.with_suffix(".json")
     expected_signature = _path_signature(source_path)
@@ -231,7 +262,8 @@ def materialize_crome_subset(
         "source_layer": source_layer,
         "source_path": str(source_path),
         "source_signature": expected_signature,
-        "subset_label": sanitize_label(subset_label, default="aoi"),
+        "tile_ids": list(normalized_tile_ids),
+        "tile_set_id": tile_set_id,
         "year": year,
     }
 
@@ -250,7 +282,8 @@ def materialize_crome_subset(
                     "source_layer",
                     "source_path",
                     "source_signature",
-                    "subset_label",
+                    "tile_ids",
+                    "tile_set_id",
                     "year",
                 )
             }
@@ -268,6 +301,8 @@ def materialize_crome_subset(
                     source_path=source_path,
                     subset_label=sanitize_label(subset_label, default="aoi"),
                     subset_path=subset_path,
+                    tile_ids=normalized_tile_ids,
+                    tile_set_id=tile_set_id,
                     year=year,
                 )
 
@@ -324,6 +359,7 @@ def materialize_crome_subset(
         "feature_count": int(feature_count) if isinstance(feature_count, int) else None,
         "manifest_path": str(manifest_path),
         "output_root": str(subset_root),
+        "subset_label": sanitize_label(subset_label, default="aoi"),
         "subset_path": str(subset_path),
     }
     manifest_path.write_text(
@@ -341,6 +377,8 @@ def materialize_crome_subset(
         source_path=source_path,
         subset_label=sanitize_label(subset_label, default="aoi"),
         subset_path=subset_path,
+        tile_ids=normalized_tile_ids,
+        tile_set_id=tile_set_id,
         year=year,
     )
 
@@ -754,6 +792,7 @@ def materialize_crome_reference_subset(
     if preferred_source is None:
         return resolved_reference_path
     source_path, source_layer = preferred_source
+    tile_ids = _subset_tile_ids(feature_raster_paths)
 
     bbox = reference_source_bbox_for_feature_rasters(
         source_path,
@@ -768,6 +807,7 @@ def materialize_crome_reference_subset(
         year=year,
         subset_bounds=tuple(float(value) for value in bbox),
         subset_label=subset_label,
+        tile_ids=tile_ids,
         source_layer=source_layer,
         force=force,
     )

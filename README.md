@@ -66,19 +66,22 @@ The downloader resolves DEFRA search results on `environment.data.gov.uk`, follo
 Each baseline run now writes:
 - `pipeline.json` for the high-level batch summary
 - `qc.json` for AOI-vs-raster coverage, label density, and reference provenance
-- per-tile label artifacts under `reference/.../tiles/`
-- per-tile training/model artifacts under `training/tiles/`
-- per-tile predictions under `prediction/tiles/`
+- per-tile label artifacts under `reference/.../tiles/<label-namespace>/`
+- per-tile training/model artifacts under `training/tiles/<model-namespace>/`
+- per-tile predictions under `prediction/tiles/<model-namespace>/`
 - per-tile `sample_cache_manifest.json` files for reusable sampled-row shards
+- `metrics.json` files that now include `evaluation_mode`, `accuracy`, `macro_f1`, and `weighted_f1` when a holdout split is available
 
 Those cache manifests can be combined later for efficient global model training without resampling the original rasters:
 
 ```bash
 crome build-training-table-from-cache \
-  --cache-manifest ./outputs/training/tiles/TRAIN_IMAGE_FULL_2024/dataset/sample_cache_manifest.json \
-  --cache-manifest ./outputs/training/tiles/TRAIN_IMAGE_LEFT_2024/dataset/sample_cache_manifest.json \
+  --cache-manifest ./outputs/training/tiles/<model-namespace>/TRAIN_IMAGE_FULL_2024/dataset/sample_cache_manifest.json \
+  --cache-manifest ./outputs/training/tiles/<model-namespace>/TRAIN_IMAGE_LEFT_2024/dataset/sample_cache_manifest.json \
   --output-dir ./outputs/training/global-2024
 ```
+
+The tile namespaces are derived from the label-transfer mode, reference settings, and model/training configuration so repeated runs against the same AlphaEarth image tiles do not overwrite each other.
 
 You can set a user-specific default artifact root with:
 

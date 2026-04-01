@@ -205,6 +205,7 @@ def test_end_to_end_pipeline(tmp_path: Path) -> None:
         tmp_path / "outputs" / "training",
     )
     trained = train_random_forest(training_table.table_path, tmp_path / "outputs" / "model")
+    metrics = json.loads(trained.metrics_path.read_text(encoding="utf-8"))
     prediction = predict_crop_map(
         feature_raster,
         trained.model_path,
@@ -225,6 +226,8 @@ def test_end_to_end_pipeline(tmp_path: Path) -> None:
     valid = labels != -1
     assert valid.any()
     assert np.array_equal(labels[valid], preds[valid])
+    assert metrics["macro_f1"] is not None
+    assert metrics["weighted_f1"] is not None
 
     mapping = json.loads(rasterized.label_mapping_path.read_text(encoding="utf-8"))
     assert mapping["label_to_id"] == {"barley": 0, "wheat": 1}
@@ -613,6 +616,42 @@ def test_run_baseline_pipeline_materializes_crome_subset_from_extracted_gpkg(tmp
     assert subset_path.suffix == ".fgb"
     assert result.reference_input_path == reference_gpkg
     assert result.reference_path == subset_path
+
+
+def test_run_baseline_pipeline_namespaces_tile_outputs_by_label_mode(tmp_path: Path) -> None:
+    feature_raster = tmp_path / "alphaearth.tif"
+    reference_geojson = tmp_path / "crome.geojson"
+    _write_feature_raster(feature_raster)
+    _write_reference_geojson(reference_geojson)
+
+    centroid_result = run_baseline_pipeline(
+        feature_input=feature_raster,
+        manifest_path=None,
+        reference_path=reference_geojson,
+        year=2024,
+        output_root=tmp_path / "outputs",
+        aoi_label="east-anglia",
+        label_mode="centroid_to_pixel",
+        test_size=0.0,
+    )
+    polygon_result = run_baseline_pipeline(
+        feature_input=feature_raster,
+        manifest_path=None,
+        reference_path=reference_geojson,
+        year=2024,
+        output_root=tmp_path / "outputs",
+        aoi_label="east-anglia",
+        label_mode="polygon_to_pixel",
+        test_size=0.0,
+    )
+
+    centroid_feature = centroid_result.feature_results[0]
+    polygon_feature = polygon_result.feature_results[0]
+
+    assert centroid_result.pipeline_manifest_path != polygon_result.pipeline_manifest_path
+    assert centroid_feature.label_raster_path != polygon_feature.label_raster_path
+    assert centroid_feature.training_output_root != polygon_feature.training_output_root
+    assert centroid_feature.prediction_output_root != polygon_feature.prediction_output_root
 
 
 def test_build_training_table_reuses_sample_cache(tmp_path: Path, monkeypatch) -> None:
