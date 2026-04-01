@@ -61,9 +61,9 @@ The repo includes [main.nf](/home/users/marcyin/UK_crop_map/nextflow/main.nf) an
 nextflow run nextflow/main.nf \
   -c nextflow/nextflow.config \
   -profile jasmin \
-  --year 2024 \
   --manifest_path /gws/ssde/j25a/nceo_isp/public/CROME/raw/alphaearth/AEF_cambridge-fringe-smoke_annual_embedding_2024/manifests/run-20260330T213729Z.json \
   --reference_path /gws/ssde/j25a/nceo_isp/public/CROME/raw/crome/CROME_2024_national/extracted/Crop_Map_of_England_CROME_2024.gpkg \
+  --year 2024 \
   --output_root /gws/ssde/j25a/nceo_isp/public/CROME \
   --run_label cambridge-norfolk \
   --slurm_account nceo_isp

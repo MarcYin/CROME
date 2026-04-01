@@ -127,7 +127,7 @@ For very large pooled tables, `crome train-model` also accepts `--max-train-rows
 
 ## Nextflow on JASMIN
 
-The repo now includes a Slurm-oriented Nextflow wrapper under [main.nf](/home/users/marcyin/UK_crop_map/main.nf) with queue profiles in [nextflow.config](/home/users/marcyin/UK_crop_map/nextflow.config). The workflow prepares one batch once, then lets Nextflow fan out one `crome run-tile-plan` task per AlphaEarth image tile and optionally run one pooled `crome train-pooled-from-tile-results` step after the tile jobs finish.
+The repo now includes a Slurm-oriented Nextflow wrapper under [main.nf](/home/users/marcyin/UK_crop_map/nextflow/main.nf) with queue profiles in [nextflow.config](/home/users/marcyin/UK_crop_map/nextflow/nextflow.config). The workflow prepares one batch once, then lets Nextflow fan out one `crome run-tile-plan` task per AlphaEarth image tile and optionally run one pooled `crome train-pooled-from-tile-results` step after the tile jobs finish.
 
 Typical JASMIN usage:
 
@@ -139,19 +139,24 @@ crome prepare-tile-batch \
   --year 2024 \
   --aoi-label cambridge-norfolk-2024
 
-nextflow run . \
-  -profile jasmin_high \
-  --batch_manifest /gws/ssde/j25a/nceo_isp/public/CROME/workflow/<tile-batch-namespace>/BATCH_cambridge-norfolk-2024_2024/batch_manifest.json \
+nextflow run nextflow/main.nf \
+  -c nextflow/nextflow.config \
+  -profile jasmin \
+  --manifest_path /gws/ssde/j25a/nceo_isp/public/CROME/raw/alphaearth/AEF_cambridge-fringe-smoke_annual_embedding_2024/manifests/run-20260330T213729Z.json \
+  --reference_path /gws/ssde/j25a/nceo_isp/public/CROME/raw/crome/CROME_2024_national/extracted/Crop_Map_of_England_CROME_2024.gpkg \
+  --year 2024 \
   --output_root /gws/ssde/j25a/nceo_isp/public/CROME \
+  --run_label cambridge-norfolk-2024 \
   --tile_cpus 16 \
   --tile_memory '128 GB' \
   --pooled_cpus 48 \
-  --pooled_memory '512 GB'
+  --pooled_memory '512 GB' \
+  --slurm_account nceo_isp
 ```
 
-The current JASMIN queue guidance supports this split well: `debug` is the right smoke-test profile, `standard` plus QoS `high` is the default for multi-core per-tile jobs because it allows up to `96` CPUs per job and `1000 GB` memory, and the access-controlled `special` partition exposes `6 TB` nodes with QoS `special` up to `96` CPUs and `3000 GB` memory for uncapped pooled fits. Source: https://help.jasmin.ac.uk/docs/batch-computing/slurm-queues/
+The current JASMIN queue guidance supports this split well: `debug` is the right control queue for the lightweight batch-planning stage, `standard` plus QoS `high` is the default for multi-core per-tile jobs because it allows up to `96` CPUs per job and `1000 GB` memory, and the access-controlled `special` partition exposes `6 TB` nodes with QoS `special` up to `96` CPUs and `3000 GB` memory for uncapped pooled fits. Source: https://help.jasmin.ac.uk/docs/batch-computing/slurm-queues/
 
-Use `-profile jasmin_special` only if your account has access to the JASMIN `special` partition. Use `-profile jasmin_short` for fast one-CPU smoke runs. The workflow keeps the scientific contract unchanged:
+Use `-profile jasmin_special` only if your account has access to the JASMIN `special` partition. The workflow keeps the scientific contract unchanged:
 
 - one task per prepared AlphaEarth image tile
 - tile-local labels, models, and predictions written by the existing `crome` CLI without batch-manifest collisions
