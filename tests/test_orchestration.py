@@ -116,6 +116,8 @@ def test_cli_prepare_tile_batch_writes_tile_manifests(tmp_path: Path, capsys) ->
             str(output_root),
             "--aoi-label",
             "cambridge-norfolk",
+            "--n-jobs",
+            "2",
         ]
     )
 
@@ -132,6 +134,8 @@ def test_cli_prepare_tile_batch_writes_tile_manifests(tmp_path: Path, capsys) ->
     tile_payloads = [json.loads(path.read_text(encoding="utf-8")) for path in tile_manifests]
     assert len({payload["tile_run_label"] for payload in tile_payloads}) == 2
     assert all(payload["reference_path"] == batch_manifest["reference_path"] for payload in tile_payloads)
+    assert batch_manifest["pooled_model"]["n_jobs"] == 2
+    assert all(payload["n_jobs"] == 2 for payload in tile_payloads)
 
 
 def test_cli_run_tile_plan_and_pooled_training(tmp_path: Path, capsys) -> None:
@@ -167,6 +171,8 @@ def test_cli_run_tile_plan_and_pooled_training(tmp_path: Path, capsys) -> None:
             "cambridge-norfolk",
             "--n-estimators",
             "10",
+            "--n-jobs",
+            "2",
         ]
     )
     assert prepare_exit == 0
@@ -203,4 +209,5 @@ def test_cli_run_tile_plan_and_pooled_training(tmp_path: Path, capsys) -> None:
     assert metrics_path.exists()
     metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
     assert metrics["evaluation_mode"] in {"feature_holdout", "train_only_no_holdout"}
+    assert metrics["n_jobs"] == 2
     assert Path(pooled_payload["pooled_manifest_path"]).exists()

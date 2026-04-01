@@ -455,6 +455,86 @@ def test_cli_list_feature_rasters_from_manifest(tmp_path: Path, capsys) -> None:
     }
 
 
+def test_cli_discover_feature_rasters_jsonl_to_output_path(tmp_path: Path, capsys) -> None:
+    feature_dir = tmp_path / "raw"
+    feature_dir.mkdir()
+    first_raster = feature_dir / "alphaearth_a.tif"
+    second_raster = feature_dir / "alphaearth_b.tif"
+    manifest_path = feature_dir / "manifests" / "run.json"
+    output_path = tmp_path / "tiles.jsonl"
+    _write_feature_raster(first_raster)
+    _write_feature_raster(second_raster)
+    _write_manifest(
+        manifest_path,
+        [
+            ("IMAGE_A", first_raster),
+            ("IMAGE_B", second_raster),
+        ],
+    )
+
+    exit_code = cli.main(
+        [
+            "discover-feature-rasters",
+            "--manifest-path",
+            str(manifest_path),
+            "--format",
+            "jsonl",
+            "--output-path",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    stdout_lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    file_lines = [line for line in output_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert stdout_lines == file_lines
+    payloads = [json.loads(line) for line in file_lines]
+    assert {item["tile_id"] for item in payloads} == {"IMAGE_A", "IMAGE_B"}
+    assert {Path(item["raster_path"]).name for item in payloads} == {
+        "alphaearth_a.tif",
+        "alphaearth_b.tif",
+    }
+
+
+def test_cli_prepare_crome_subset_from_managed_reference(tmp_path: Path, capsys) -> None:
+    feature_raster = tmp_path / "alphaearth_a.tif"
+    extracted_reference = (
+        tmp_path
+        / "raw"
+        / "crome"
+        / "CROME_2024_national"
+        / "extracted"
+        / "Crop_Map_of_England_CROME_2024.gpkg"
+    )
+    _write_feature_raster(feature_raster)
+    extracted_reference.parent.mkdir(parents=True, exist_ok=True)
+    _write_reference_gpkg(extracted_reference)
+
+    exit_code = cli.main(
+        [
+            "prepare-crome-subset",
+            "--feature-input",
+            str(feature_raster),
+            "--reference-path",
+            str(extracted_reference),
+            "--year",
+            "2024",
+            "--output-root",
+            str(tmp_path / "outputs"),
+            "--subset-label",
+            "cambridge-fringe",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["subset_materialized"] is True
+    assert payload["reference_path"].endswith(".fgb")
+    assert Path(payload["reference_path"]).exists()
+    assert payload["reference_manifest_path"] is not None
+    assert Path(payload["reference_manifest_path"]).exists()
+
+
 def test_cli_build_training_table_from_cache(tmp_path: Path, capsys) -> None:
     feature_raster = tmp_path / "alphaearth.tif"
     reference_geojson = tmp_path / "crome.geojson"

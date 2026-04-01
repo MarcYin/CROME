@@ -18,7 +18,10 @@ Crop classification workflows for UK crop mapping, currently centered on Sentine
 - `pyproject.toml`
 - `src/crome/acquisition/alphaearth.py`
 - `src/crome/acquisition/crome.py`
+- `src/crome/orchestration.py`
 - `tests/`
+- `main.nf`
+- `nextflow.config`
 - `get_monthly_composite.py`
 - `sample_spectra.py`
 - `merge_samples.py`
@@ -45,6 +48,35 @@ Crop classification workflows for UK crop mapping, currently centered on Sentine
 8. Write run-level QC/provenance with requested AOI bounds, actual raster bounds, AOI window, label coverage stats, and reference metadata.
 9. Predict a 10 m crop map per AlphaEarth image tile using that tile's local model.
 10. Rebuild larger regional or global training tables later by combining the cached per-tile sample manifests instead of rescanning rasters.
+
+## Cluster execution
+
+The repo now includes a Nextflow wrapper for cluster-parallel execution on AlphaEarth image tiles. It sits on top of three orchestration commands:
+
+```bash
+crome prepare-tile-batch --manifest-path ./outputs/raw/alphaearth/.../manifests/run.json --reference-path ./outputs/raw/crome/.../extracted/Crop_Map_of_England_CROME_2024.gpkg --year 2024 --output-root ./outputs
+crome run-tile-plan --tile-plan ./outputs/workflow/.../tiles/<tile>.json
+crome train-pooled-from-tile-results --batch-manifest ./outputs/workflow/.../batch_manifest.json --tile-result ./outputs/workflow/.../tile-results/<tile>.tile-result.json
+```
+
+For JASMIN, the fastest practical default is the `jasmin` Nextflow profile, because the official queue guidance now limits the `standard`, `short`, and `long` QoS to single-CPU jobs, while QoS `high` on the `standard` partition allows up to `96` CPUs per job and `1000 GB` memory. The `special` partition is reserved for separate high-memory access.
+
+```bash
+nextflow run nextflow/main.nf \
+  -c nextflow/nextflow.config \
+  -profile jasmin \
+  --year 2024 \
+  --manifest_path /gws/ssde/j25a/nceo_isp/public/CROME/raw/alphaearth/AEF_cambridge-fringe-smoke_annual_embedding_2024/manifests/run-20260330T213729Z.json \
+  --reference_path /gws/ssde/j25a/nceo_isp/public/CROME/raw/crome/CROME_2024_national/extracted/Crop_Map_of_England_CROME_2024.gpkg \
+  --output_root /gws/ssde/j25a/nceo_isp/public/CROME \
+  --run_label cambridge-norfolk \
+  --slurm_account nceo_isp
+```
+
+The Nextflow wrapper uses:
+- one shared `prepare-tile-batch` stage to materialize the batch subset once
+- per-tile `run-tile-plan` fan-out followed by one optional pooled gather/training step
+- in-place reads from the shared filesystem rather than staging full AlphaEarth GeoTIFFs into each task directory
 
 ## Reference acquisition
 
@@ -95,7 +127,7 @@ For very large pooled tables, `crome train-model` also accepts `--max-train-rows
 
 ## Nextflow on JASMIN
 
-The repo now includes a Slurm-oriented Nextflow wrapper under [main.nf](/home/users/marcyin/UK_crop_map/workflows/nextflow/main.nf) with queue profiles in [nextflow.config](/home/users/marcyin/UK_crop_map/workflows/nextflow/nextflow.config). The workflow assumes you prepare a batch once, then let Nextflow fan out one `crome run-tile-plan` task per AlphaEarth image tile and optionally run one pooled `crome train-pooled-from-tile-results` step after the tile jobs finish.
+The repo now includes a Slurm-oriented Nextflow wrapper under [main.nf](/home/users/marcyin/UK_crop_map/main.nf) with queue profiles in [nextflow.config](/home/users/marcyin/UK_crop_map/nextflow.config). The workflow prepares one batch once, then lets Nextflow fan out one `crome run-tile-plan` task per AlphaEarth image tile and optionally run one pooled `crome train-pooled-from-tile-results` step after the tile jobs finish.
 
 Typical JASMIN usage:
 
@@ -107,10 +139,10 @@ crome prepare-tile-batch \
   --year 2024 \
   --aoi-label cambridge-norfolk-2024
 
-nextflow run workflows/nextflow/main.nf \
-  -c workflows/nextflow/nextflow.config \
-  -profile jasmin \
+nextflow run . \
+  -profile jasmin_high \
   --batch_manifest /gws/ssde/j25a/nceo_isp/public/CROME/workflow/<tile-batch-namespace>/BATCH_cambridge-norfolk-2024_2024/batch_manifest.json \
+  --output_root /gws/ssde/j25a/nceo_isp/public/CROME \
   --tile_cpus 16 \
   --tile_memory '128 GB' \
   --pooled_cpus 48 \
@@ -119,7 +151,7 @@ nextflow run workflows/nextflow/main.nf \
 
 The current JASMIN queue guidance supports this split well: `debug` is the right smoke-test profile, `standard` plus QoS `high` is the default for multi-core per-tile jobs because it allows up to `96` CPUs per job and `1000 GB` memory, and the access-controlled `special` partition exposes `6 TB` nodes with QoS `special` up to `96` CPUs and `3000 GB` memory for uncapped pooled fits. Source: https://help.jasmin.ac.uk/docs/batch-computing/slurm-queues/
 
-Use `-profile jasmin_special` only if your account has access to the JASMIN `special` partition. The workflow keeps the scientific contract unchanged:
+Use `-profile jasmin_special` only if your account has access to the JASMIN `special` partition. Use `-profile jasmin_short` for fast one-CPU smoke runs. The workflow keeps the scientific contract unchanged:
 
 - one task per prepared AlphaEarth image tile
 - tile-local labels, models, and predictions written by the existing `crome` CLI without batch-manifest collisions

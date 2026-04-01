@@ -1,45 +1,63 @@
 # Nextflow on JASMIN
 
-The cluster wrapper lives in [main.nf](/home/users/marcyin/UK_crop_map/workflows/nextflow/main.nf) and [nextflow.config](/home/users/marcyin/UK_crop_map/workflows/nextflow/nextflow.config).
+The repo includes a Slurm-oriented Nextflow wrapper in [main.nf](/home/users/marcyin/UK_crop_map/nextflow/main.nf) with queue profiles in [nextflow.config](/home/users/marcyin/UK_crop_map/nextflow/nextflow.config).
 
-The workflow shape is:
+It does not replace the Python pipeline. It schedules the existing `crome` commands in a cluster-friendly order:
 
-1. Run `crome prepare-tile-batch` once on the login node or an interactive session.
-2. Run one `crome run-tile-plan` task per prepared AlphaEarth image tile.
-3. Optionally run one pooled `crome train-pooled-from-tile-results` task after the tile jobs finish.
+1. `crome prepare-tile-batch` discovers AlphaEarth tiles, materializes one shared CROME subset for the batch, and writes one tile-plan JSON per AlphaEarth tile.
+2. One `crome run-tile-plan` task runs per tile-plan JSON.
+3. The resulting tile-result JSON files are optionally gathered into one `crome train-pooled-from-tile-results` task.
 
-Typical usage:
+That keeps tile identity, subset reuse, cache reuse, and pooled-training provenance intact while letting Slurm parallelize the expensive work.
+
+## Queue mapping
+
+The current JASMIN Slurm queue guidance supports this split:
+
+- `debug` partition with QoS `debug`: up to `8` CPUs for `1 hour`; use for the lightweight batch-planning/control step.
+- `standard` partition with QoS `high`: up to `96` CPUs, `48 hours`, and `1000 GB` per job; use for per-tile training or pooled training when you want multi-core random-forest fits.
+- `special` partition with QoS `special`: access-controlled, backed by `6 TB` / `192` core nodes, with jobs allowed up to `96` CPUs, `48 hours`, and `3000 GB`; use only if your account has access.
+
+Source: <https://help.jasmin.ac.uk/docs/batch-computing/slurm-queues/>
+
+## Typical run
 
 ```bash
-crome prepare-tile-batch \
-  --manifest-path /gws/ssde/j25a/nceo_isp/public/CROME/raw/alphaearth/<run>/manifests/run.json \
-  --reference-path /gws/ssde/j25a/nceo_isp/public/CROME/raw/crome/CROME_2024_national/extracted/Crop_Map_of_England_CROME_2024.gpkg \
-  --output-root /gws/ssde/j25a/nceo_isp/public/CROME \
+nextflow run nextflow/main.nf -c nextflow/nextflow.config -profile jasmin \
+  --manifest_path /gws/ssde/j25a/nceo_isp/public/CROME/raw/alphaearth/AEF_cambridge-fringe-smoke_annual_embedding_2024/manifests/run-20260330T213729Z.json \
+  --reference_path /gws/ssde/j25a/nceo_isp/public/CROME/raw/crome/CROME_2024_national/extracted/Crop_Map_of_England_CROME_2024.gpkg \
+  --output_root /gws/ssde/j25a/nceo_isp/public/CROME \
   --year 2024 \
-  --aoi-label east-anglia-2024
-
-nextflow run workflows/nextflow/main.nf \
-  -c workflows/nextflow/nextflow.config \
-  -profile jasmin \
-  --batch_manifest /gws/ssde/j25a/nceo_isp/public/CROME/workflow/<tile-batch-namespace>/BATCH_east-anglia-2024_2024/batch_manifest.json \
+  --run_label cambridge-norfolk-2024 \
+  --label_mode centroid_to_pixel \
+  --tile_partition standard \
+  --tile_qos high \
   --tile_cpus 16 \
   --tile_memory '128 GB' \
-  --pooled_cpus 48 \
-  --pooled_memory '512 GB'
+  --pooled_partition standard \
+  --pooled_qos high \
+  --pooled_cpus 64 \
+  --pooled_memory '512 GB' \
+  --slurm_account my-gws
 ```
 
-The JASMIN queue defaults in the workflow are based on the current queue guidance:
+If you have access to the high-memory `special` partition, switch to:
 
-- `debug` partition with QoS `debug`: up to `8` CPUs and `1 hour`, useful for smoke tests.
-- `standard` partition with QoS `high`: up to `96` CPUs, `48 hours`, and `1000 GB`, which is the default profile for multi-core tile jobs and pooled training.
-- `special` partition with QoS `special`: up to `96` CPUs, `48 hours`, and `3000 GB` on the new `6 TB` nodes, for very large pooled fits if your account has access.
+```bash
+nextflow run nextflow/main.nf -c nextflow/nextflow.config -profile jasmin_special \
+  --manifest_path /path/to/run.json \
+  --reference_path /path/to/Crop_Map_of_England_CROME_2024.gpkg \
+  --output_root /gws/ssde/j25a/nceo_isp/public/CROME \
+  --year 2024 \
+  --run_label pooled-special \
+  --slurm_account my-gws
+```
 
-Source: https://help.jasmin.ac.uk/docs/batch-computing/slurm-queues/
+## Notes
 
-Why the workflow is structured this way:
-
-- The per-tile commands keep tile-local labels, models, predictions, and caches aligned with the existing `crome` CLI.
-- The prepared tile manifests give each tile job a unique run label, so one-tile `pipeline.json` files do not overwrite each other.
-- The pooled stage only trusts emitted per-tile `pipeline.json` paths, which preserves the same provenance chain as the local CLI path.
-
-The `jasmin_special` profile only changes the pooled-model step to the access-controlled `special` partition. The tile jobs stay on `standard` with QoS `high`, which is the better default for many parallel tile tasks.
+- Use `--manifest_path` when you want the workflow to preserve the original `edown` source-image identity for each AlphaEarth tile.
+- Use `--feature_input` when you already have a directory tree of AlphaEarth GeoTIFFs and do not need manifest metadata.
+- The Nextflow wrapper reads rasters in place from the shared filesystem; it does not stage the full AlphaEarth GeoTIFFs into each task directory.
+- Each tile plan points at the same prepared CROME subset for the batch, so the expensive reference clipping work happens once.
+- Per-tile labels, models, predictions, and sample caches still come from the existing Python code, so pooled training remains compatible with `crome train-pooled-model`.
+- Nextflow itself is not bundled with the Python package. Load or install it in your JASMIN software environment before running the workflow.

@@ -33,6 +33,9 @@ crome train-pooled-model --pipeline-manifest ./outputs/training/<model-namespace
 crome train-model --training-table ./outputs/training/training_table.pkl --output-dir ./outputs/model --label-mapping ./outputs/reference/crome_hex/REF_crome_hex_east-anglia_2024/labels.json
 crome predict-map --feature-raster alphaearth.tif --model-path ./outputs/model/model.pkl --output-raster ./outputs/prediction.tif
 crome run-baseline-pipeline --feature-input ./download-output --reference-path crome.geojson --year 2024 --aoi-label east-anglia --output-root ./outputs
+crome prepare-tile-batch --manifest-path ./outputs/raw/alphaearth/.../manifests/run.json --reference-path ./outputs/raw/crome/.../extracted/Crop_Map_of_England_CROME_2024.gpkg --year 2024 --output-root ./outputs
+crome run-tile-plan --tile-plan ./outputs/workflow/.../tiles/<tile>.json
+crome train-pooled-from-tile-results --batch-manifest ./outputs/workflow/.../batch_manifest.json --tile-result ./outputs/workflow/.../<tile>.tile-result.json
 ```
 
 `download-run-baseline` is the shortest operator path when you want the package to call `edown`, discover native AlphaEarth rasters, rasterize CROME labels, train one baseline model per AlphaEarth image tile, and emit prediction rasters in one pass.
@@ -46,8 +49,27 @@ Each batch run still writes a summary `pipeline.json` and `qc.json`, while each 
 For large pooled or global tables, `train-model` can cap only the training side of the split via `--max-train-rows`, which keeps held-out tile evaluation intact while making very dense polygon-fill tables tractable.
 `train-pooled-model` is the operator shortcut for that workflow: it reads one or more prior `pipeline.json` files, resolves their `sample_cache_manifest.json` inputs, builds the pooled dataset, and trains the pooled model in one step.
 That cache layout keeps later global model training efficient because `build-training-table-from-cache` can combine per-tile cached samples without rereading the original feature rasters.
+For cluster execution, `prepare-tile-batch`, `run-tile-plan`, and `train-pooled-from-tile-results` expose the same work as one shared subset-prep stage, one job per AlphaEarth tile, and one pooled gather/training stage.
 `download-crome` resolves the DEFRA search results and landing-page `files` list, prefers the national `.gpkg.zip` asset for the requested year, and automatically falls back to `- Complete` nationwide releases for older years such as 2016 and 2017.
 The default label mode is `centroid_to_pixel`, so each CROME hexagon contributes supervision at the single AlphaEarth pixel containing its centroid. Pass `--label-mode polygon_to_pixel` if you intentionally want polygon-fill training labels.
+
+## Nextflow on JASMIN
+
+The repo includes [main.nf](/home/users/marcyin/UK_crop_map/nextflow/main.nf) and [nextflow.config](/home/users/marcyin/UK_crop_map/nextflow/nextflow.config). The recommended JASMIN profile is `jasmin`, which maps the multi-core tile and pooled stages to the `standard` partition with QoS `high`. `jasmin_special` is reserved for users who have access to the high-memory `special` partition.
+
+```bash
+nextflow run nextflow/main.nf \
+  -c nextflow/nextflow.config \
+  -profile jasmin \
+  --year 2024 \
+  --manifest_path /gws/ssde/j25a/nceo_isp/public/CROME/raw/alphaearth/AEF_cambridge-fringe-smoke_annual_embedding_2024/manifests/run-20260330T213729Z.json \
+  --reference_path /gws/ssde/j25a/nceo_isp/public/CROME/raw/crome/CROME_2024_national/extracted/Crop_Map_of_England_CROME_2024.gpkg \
+  --output_root /gws/ssde/j25a/nceo_isp/public/CROME \
+  --run_label cambridge-norfolk \
+  --slurm_account nceo_isp
+```
+
+The wrapper prepares one shared tile batch, then fans out one `run-tile-plan` task per AlphaEarth tile and gathers the emitted tile results into one optional pooled-training step. It reads rasters in place from the shared filesystem instead of staging full GeoTIFFs into each task directory.
 The repo also includes a Nextflow+Slurm wrapper for JASMIN in [nextflow.md](/home/users/marcyin/UK_crop_map/docs/nextflow.md).
 
 To keep a user-specific shared data root without hardcoding it into the project, set:

@@ -362,6 +362,11 @@ def run_tile_plan(tile_plan_path: Path | str) -> TilePlanRunResult:
         random_state=int(payload["random_state"]),
         n_estimators=int(payload["n_estimators"]),
         n_jobs=int(payload.get("n_jobs", -1)),
+        max_train_rows=(
+            int(payload["max_train_rows"])
+            if payload.get("max_train_rows") is not None
+            else None
+        ),
         predict=bool(payload["predict"]),
         skip_empty_labels=bool(payload["skip_empty_labels"]),
     )
@@ -481,6 +486,12 @@ def build_prepare_tile_batch_parser() -> argparse.ArgumentParser:
 def build_run_tile_plan_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one prepared per-tile batch plan.")
     parser.add_argument("--tile-plan", required=True, help="Path to one prepared tile JSON manifest.")
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=None,
+        help="Optional override for tile-local RandomForest CPU parallelism.",
+    )
     return parser
 
 
@@ -565,7 +576,14 @@ def main_prepare_tile_batch(argv: list[str] | None = None) -> int:
 def main_run_tile_plan(argv: list[str] | None = None) -> int:
     parser = build_run_tile_plan_parser()
     args = parser.parse_args(argv)
-    result = run_tile_plan(args.tile_plan)
+    tile_plan_path = Path(args.tile_plan)
+    if args.n_jobs is not None:
+        payload = _load_json_payload(tile_plan_path)
+        payload["n_jobs"] = int(args.n_jobs)
+        override_path = tile_plan_path.parent / f"{tile_plan_path.stem}.n_jobs_{args.n_jobs}.json"
+        override_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tile_plan_path = override_path
+    result = run_tile_plan(tile_plan_path)
     payload = _pipeline_result_payload(result.pipeline)
     payload["batch_manifest_path"] = str(result.batch_manifest_path)
     payload["tile_plan_path"] = str(result.tile_plan_path)

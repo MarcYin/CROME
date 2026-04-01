@@ -709,7 +709,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the baseline AlphaEarth-to-CROME pipeline over one or more native rasters."
     )
-    parser.add_argument(
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
         "--feature-input",
         default=None,
         help=(
@@ -717,10 +718,10 @@ def build_parser() -> argparse.ArgumentParser:
             "GeoTIFFs."
         ),
     )
-    parser.add_argument(
+    input_group.add_argument(
         "--manifest-path",
         default=None,
-        help="Optional edown manifest; raster discovery falls back to the manifest directory.",
+        help="Path to an edown manifest; raster discovery falls back to the manifest directory.",
     )
     parser.add_argument("--reference-path", required=True, help="Path to the CROME vector reference file.")
     parser.add_argument("--year", required=True, type=int, help="Reference year.")
@@ -791,8 +792,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.feature_input is None and args.manifest_path is None:
-        parser.error("Provide at least one of --feature-input or --manifest-path.")
     result = run_baseline_pipeline(
         feature_input=args.feature_input,
         manifest_path=args.manifest_path,
