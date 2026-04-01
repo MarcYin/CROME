@@ -3,8 +3,11 @@ from pathlib import Path
 import zipfile
 
 import geopandas as gpd
+import numpy as np
 import pyogrio
 import pytest
+import rasterio
+from rasterio.transform import from_origin
 from shapely.geometry import Polygon
 
 from crome.acquisition.crome import (
@@ -13,6 +16,7 @@ from crome.acquisition.crome import (
     _build_search_url,
     download_crome_reference,
     extract_crome_gpkg_zip_url,
+    materialize_crome_reference_subset,
     resolve_crome_landing_page,
 )
 from crome.config import CromeDownloadRequest
@@ -38,6 +42,22 @@ def _write_reference_gpkg(path: Path) -> None:
     )
     national.to_file(path, layer="Crop_Map_of_England_2017", driver="GPKG")
     county.to_file(path, layer="Crop_Map_of_England_2017_Cambridgeshire", driver="GPKG")
+
+
+def _write_feature_raster(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=2,
+        width=4,
+        count=64,
+        dtype="float32",
+        crs="EPSG:27700",
+        transform=from_origin(0.0, 2.0, 1.0, 1.0),
+    ) as dst:
+        dst.write(np.ones((64, 2, 4), dtype="float32"))
 
 
 def _next_data_html(page_props: dict) -> str:
@@ -390,3 +410,67 @@ def test_download_crome_reference_removes_stale_partial_archive(tmp_path: Path) 
 
     assert result.archive_path.exists()
     assert not partial_path.exists()
+
+
+def test_materialize_crome_reference_subset_writes_and_reuses_subset(tmp_path: Path) -> None:
+    source_gpkg = (
+        tmp_path
+        / "raw"
+        / "crome"
+        / "CROME_2017_complete"
+        / "extracted"
+        / "source.gpkg"
+    )
+    feature_raster = tmp_path / "alphaearth.tif"
+    source_gpkg.parent.mkdir(parents=True, exist_ok=True)
+    _write_reference_gpkg(source_gpkg)
+    _write_feature_raster(feature_raster)
+
+    subset_path = materialize_crome_reference_subset(
+        source_gpkg,
+        feature_raster_paths=[feature_raster],
+        subset_label="cambridge-fringe",
+        year=2017,
+    )
+
+    assert subset_path == (
+        tmp_path
+        / "raw"
+        / "crome"
+        / "CROME_2017_complete"
+        / "subsets"
+        / "Crop_Map_of_England_2017_cambridge-fringe.fgb"
+    )
+    assert subset_path.exists()
+    assert pyogrio.read_info(subset_path)["features"] == 2
+
+    manifest_path = subset_path.with_suffix(".json")
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["source_path"] == str(source_gpkg)
+    assert payload["source_layer"] == "Crop_Map_of_England_2017"
+    assert payload["source_signature"]["path"] == str(source_gpkg.resolve())
+    assert payload["subset_label"] == "cambridge-fringe"
+
+    reused_path = materialize_crome_reference_subset(
+        source_gpkg,
+        feature_raster_paths=[feature_raster],
+        subset_label="cambridge-fringe",
+        year=2017,
+    )
+    assert reused_path == subset_path
+
+
+def test_materialize_crome_reference_subset_leaves_external_vector_unchanged(tmp_path: Path) -> None:
+    source_gpkg = tmp_path / "source.gpkg"
+    feature_raster = tmp_path / "alphaearth.tif"
+    _write_reference_gpkg(source_gpkg)
+    _write_feature_raster(feature_raster)
+
+    subset_path = materialize_crome_reference_subset(
+        source_gpkg,
+        feature_raster_paths=[feature_raster],
+        subset_label="cambridge-fringe",
+        year=2017,
+    )
+
+    assert subset_path == source_gpkg

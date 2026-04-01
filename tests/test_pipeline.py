@@ -573,6 +573,48 @@ def test_run_baseline_pipeline_skips_rasters_without_reference_coverage(tmp_path
     assert result.skipped_features[0].feature_id == "uncovered"
 
 
+def test_run_baseline_pipeline_materializes_crome_subset_from_extracted_gpkg(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "raw"
+    feature_dir.mkdir()
+    feature_raster = feature_dir / "alphaearth_full.tif"
+    manifest_path = feature_dir / "manifests" / "run.json"
+    reference_gpkg = (
+        tmp_path
+        / "raw"
+        / "crome"
+        / "CROME_2024_national"
+        / "extracted"
+        / "crome_2024.gpkg"
+    )
+    _write_feature_raster(feature_raster)
+    reference_gpkg.parent.mkdir(parents=True, exist_ok=True)
+    _write_reference_gpkg(reference_gpkg)
+    _write_manifest(
+        manifest_path,
+        [("IMAGE_FULL", feature_raster)],
+        aoi_bounds=(0.0, 0.0, 4.0, 4.0),
+    )
+
+    result = run_baseline_pipeline(
+        feature_input=feature_dir,
+        manifest_path=manifest_path,
+        reference_path=reference_gpkg,
+        year=2024,
+        output_root=tmp_path / "outputs",
+        aoi_label="east-anglia",
+        label_mode="polygon_to_pixel",
+        test_size=0.0,
+    )
+
+    payload = json.loads(result.pipeline_manifest_path.read_text(encoding="utf-8"))
+    subset_path = Path(payload["reference_path"])
+    assert subset_path.exists()
+    assert subset_path.parent.name == "subsets"
+    assert subset_path.suffix == ".fgb"
+    assert result.reference_input_path == reference_gpkg
+    assert result.reference_path == subset_path
+
+
 def test_build_training_table_reuses_sample_cache(tmp_path: Path, monkeypatch) -> None:
     feature_raster = tmp_path / "alphaearth.tif"
     reference_geojson = tmp_path / "crome.geojson"

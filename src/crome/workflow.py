@@ -39,6 +39,9 @@ def _warn_if_conditional_year(request: AlphaEarthDownloadRequest) -> None:
 
 
 def _pipeline_result_to_dict(result: BaselinePipelineResult) -> dict[str, Any]:
+    reference_input_path = getattr(result, "reference_input_path", None)
+    reference_manifest_path = getattr(result, "reference_manifest_path", None)
+    reference_path = getattr(result, "reference_path", None)
     return {
         "feature_count": len(result.feature_results),
         "features": [
@@ -84,6 +87,11 @@ def _pipeline_result_to_dict(result: BaselinePipelineResult) -> dict[str, Any]:
         "manifest_path": str(result.manifest_path) if result.manifest_path is not None else None,
         "pipeline_manifest_path": str(result.pipeline_manifest_path),
         "qc_manifest_path": str(result.qc_manifest_path),
+        "reference_input_path": str(reference_input_path) if reference_input_path is not None else None,
+        "reference_manifest_path": (
+            str(reference_manifest_path) if reference_manifest_path is not None else None
+        ),
+        "reference_path": str(reference_path) if reference_path is not None else None,
         "skipped_feature_count": len(result.skipped_features),
         "sample_cache_root": str(result.sample_cache_root) if result.sample_cache_root is not None else None,
     }

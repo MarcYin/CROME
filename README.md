@@ -61,7 +61,7 @@ crome download-crome --year 2017 --output-root ./outputs
 crome download-run-baseline --year 2017 --aoi-label east-anglia --bbox -1 51 0 52 --output-root ./outputs
 ```
 
-The downloader resolves DEFRA search results on `environment.data.gov.uk`, follows the dataset landing page, inspects the server-rendered file list, prefers the national `.gpkg.zip` asset, falls back to `- Complete` variants for older nationwide releases, then normalizes the selected national layer into FlatGeobuf for bbox-friendly reads.
+The downloader resolves DEFRA search results on `environment.data.gov.uk`, follows the dataset landing page, inspects the server-rendered file list, prefers the national `.gpkg.zip` asset, and falls back to `- Complete` variants for older nationwide releases. During live baseline runs, the package now treats the extracted national GeoPackage as the source of truth and automatically materializes or reuses a batch-specific subset under `raw/crome/.../subsets/` before rasterization.
 
 Each baseline run now writes:
 - `pipeline.json` for the high-level batch summary
@@ -90,4 +90,4 @@ When `CROME_DATA_ROOT` is set, CLI commands use it as the default `--output-root
 
 The default label mode is `centroid_to_pixel`, which treats each CROME hexagon as one supervision point at the pixel containing its centroid. If you want the older polygon-fill behavior, pass `--label-mode polygon_to_pixel`.
 
-The current 2024 national CROME GeoPackage is layered by county and can expose positive-area overlaps at county seams. Auto-downloaded references now normalize the national layer to FlatGeobuf, which avoids that multi-layer union in the baseline path. If you point the pipeline at a raw overlapping vector source, `--overlap-policy first` is still the pragmatic live-run override.
+The current 2024 national CROME GeoPackage is layered by county and can expose positive-area overlaps at county seams. The live baseline path now clips or reuses an AOI-specific subset from the national source before label rasterization, which avoids relying on the unstable national normalized FGB for AOI bbox reads. If you point the pipeline at a raw overlapping vector source, `--overlap-policy first` is still the pragmatic live-run override.

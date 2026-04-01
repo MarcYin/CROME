@@ -8,6 +8,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .acquisition.crome import materialize_crome_reference_subset
 from .config import AlphaEarthDownloadRequest, AlphaEarthTrainingSpec, CromeReferenceConfig
 from .discovery import discover_feature_rasters
 from .features import read_feature_raster_spec
@@ -78,6 +79,9 @@ class BaselinePipelineResult:
     manifest_path: Path | None
     pipeline_manifest_path: Path
     qc_manifest_path: Path
+    reference_input_path: Path
+    reference_manifest_path: Path | None
+    reference_path: Path
     skipped_features: tuple[SkippedFeatureResult, ...]
     sample_cache_root: Path | None
 
@@ -345,12 +349,33 @@ def run_baseline_pipeline(
         label_mode=spec.label_mode,
         reference_name=spec.reference.reference_name,
     )
-    reference_bbox = reference_source_bbox_for_feature_rasters(
+    resolved_reference_path = materialize_crome_reference_subset(
         reference_path,
+        feature_raster_paths=[feature.raster_path for feature in discovered],
+        subset_label=spec.alphaearth.aoi_label,
+        year=year,
+    )
+    if Path(resolved_reference_path) != Path(reference_path):
+        spec = _build_training_spec(
+            feature_input=feature_input,
+            manifest_path=manifest_path,
+            reference_path=resolved_reference_path,
+            year=year,
+            output_root=output_root,
+            aoi_label=aoi_label,
+            label_column=label_column,
+            geometry_column=geometry_column,
+            label_mode=label_mode,
+            overlap_policy=overlap_policy,
+            all_touched=all_touched,
+            nodata_label=nodata_label,
+        )
+    reference_bbox = reference_source_bbox_for_feature_rasters(
+        resolved_reference_path,
         [feature.raster_path for feature in discovered],
     )
     global_label_to_id, _ = load_reference_label_mapping(
-        reference_path,
+        resolved_reference_path,
         label_column,
         bbox=reference_bbox,
     )
@@ -358,7 +383,7 @@ def run_baseline_pipeline(
     manifest_payload = load_manifest_payload(manifest_path)
     requested_aoi = requested_aoi_from_manifest(manifest_payload)
     download_summary = _download_summary_by_image_id(manifest_payload)
-    reference_manifest_path = _reference_manifest_path(reference_path)
+    reference_manifest_path = _reference_manifest_path(resolved_reference_path)
 
     for feature in discovered:
         tile_id = _feature_tile_id(feature)
@@ -410,7 +435,7 @@ def run_baseline_pipeline(
                     str(reference_manifest_path) if reference_manifest_path is not None else None
                 ),
                 "reference_name": spec.reference.reference_name,
-                "reference_path": str(reference_path),
+                "reference_path": str(resolved_reference_path),
                 "source_image_id": feature.source_image_id,
                 "tile_id": tile_id,
                 "year": year,
@@ -472,11 +497,12 @@ def run_baseline_pipeline(
                         )
                     ],
                     "manifest_path": str(manifest_path) if manifest_path is not None else None,
+                    "reference_input_path": str(Path(reference_path)),
                     "reference_manifest_path": (
                         str(reference_manifest_path) if reference_manifest_path is not None else None
                     ),
-                    "reference_path": str(reference_path),
-                    "reference_summary": reference_summary(reference_path),
+                    "reference_path": str(resolved_reference_path),
+                    "reference_summary": reference_summary(resolved_reference_path),
                     "requested_aoi": (
                         {
                             "bounds": list(requested_aoi["bounds"]),
@@ -528,11 +554,12 @@ def run_baseline_pipeline(
                     for feature in processed_features
                 ],
                 "manifest_path": str(manifest_path) if manifest_path is not None else None,
+                "reference_input_path": str(Path(reference_path)),
                 "reference_manifest_path": (
                     str(reference_manifest_path) if reference_manifest_path is not None else None
                 ),
-                "reference_path": str(reference_path),
-                "reference_summary": reference_summary(reference_path),
+                "reference_path": str(resolved_reference_path),
+                "reference_summary": reference_summary(resolved_reference_path),
                 "requested_aoi": (
                     {
                         "bounds": list(requested_aoi["bounds"]),
@@ -575,11 +602,12 @@ def run_baseline_pipeline(
         "manifest_path": str(manifest_path) if manifest_path is not None else None,
         "label_mode": spec.label_mode,
         "qc_manifest_path": str(qc_manifest_path),
+        "reference_input_path": str(Path(reference_path)),
         "reference_manifest_path": (
             str(reference_manifest_path) if reference_manifest_path is not None else None
         ),
-        "reference_path": str(reference_path),
-        "reference_summary": reference_summary(reference_path),
+        "reference_path": str(resolved_reference_path),
+        "reference_summary": reference_summary(resolved_reference_path),
         "sample_cache_manifest_paths": [
             str(feature.sample_cache_manifest_path)
             for feature in processed_features
@@ -608,6 +636,9 @@ def run_baseline_pipeline(
         manifest_path=Path(manifest_path) if manifest_path is not None else None,
         pipeline_manifest_path=pipeline_manifest_path,
         qc_manifest_path=qc_manifest_path,
+        reference_input_path=Path(reference_path),
+        reference_manifest_path=reference_manifest_path,
+        reference_path=Path(resolved_reference_path),
         skipped_features=tuple(skipped_features),
         sample_cache_root=sample_cache_dir,
     )
@@ -713,6 +744,11 @@ def main(argv: list[str] | None = None) -> int:
         "manifest_path": str(result.manifest_path) if result.manifest_path is not None else None,
         "pipeline_manifest_path": str(result.pipeline_manifest_path),
         "qc_manifest_path": str(result.qc_manifest_path),
+        "reference_input_path": str(result.reference_input_path),
+        "reference_manifest_path": (
+            str(result.reference_manifest_path) if result.reference_manifest_path is not None else None
+        ),
+        "reference_path": str(result.reference_path),
         "skipped_feature_count": len(result.skipped_features),
         "sample_cache_root": str(result.sample_cache_root) if result.sample_cache_root is not None else None,
     }

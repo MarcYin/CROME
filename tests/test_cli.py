@@ -411,6 +411,9 @@ def test_cli_run_baseline_pipeline_from_manifest(tmp_path: Path, capsys) -> None
     assert payload["feature_count"] == 2
     assert len(payload["features"]) == 2
     assert payload["qc_manifest_path"] is not None
+    assert payload["reference_input_path"] == str(reference_geojson)
+    assert payload["reference_path"] == str(reference_geojson)
+    assert payload["reference_manifest_path"] is None
     assert all(item["sample_cache_manifest_path"] is not None for item in payload["features"])
     assert payload["skipped_feature_count"] == 0
     assert Path(payload["pipeline_manifest_path"]).exists()
@@ -615,9 +618,11 @@ def test_cli_download_run_baseline_auto_downloads_crome(monkeypatch, tmp_path: P
     assert payload["pipeline"]["feature_count"] == 1
     assert payload["pipeline"]["sample_cache_root"] is not None
     assert len(payload["pipeline"]["features"]) == 1
+    assert Path(payload["pipeline"]["reference_path"]).parent.name == "subsets"
+    assert payload["pipeline"]["reference_input_path"] == str(extracted_reference)
 
 
-def test_cli_download_run_baseline_retries_with_extracted_reference(
+def test_cli_download_run_baseline_uses_materialized_subset_reference(
     monkeypatch,
     tmp_path: Path,
     capsys,
@@ -669,8 +674,6 @@ def test_cli_download_run_baseline_retries_with_extracted_reference(
 
     def fake_run_pipeline(**kwargs):
         captured_reference_paths.append(str(kwargs["reference_path"]))
-        if Path(kwargs["reference_path"]) == normalized_reference:
-            raise ValueError("Reference source does not expose any non-null labels.")
         return SimpleNamespace(
             feature_results=(
                 SimpleNamespace(
@@ -696,6 +699,9 @@ def test_cli_download_run_baseline_retries_with_extracted_reference(
             manifest_path=manifest_path,
             pipeline_manifest_path=output_root / "pipeline.json",
             qc_manifest_path=output_root / "qc.json",
+            reference_input_path=Path(kwargs["reference_path"]),
+            reference_manifest_path=tmp_path / "raw" / "crome" / "manifest.json",
+            reference_path=Path(kwargs["reference_path"]),
             skipped_features=(),
             sample_cache_root=output_root / "cache",
         )
@@ -722,7 +728,7 @@ def test_cli_download_run_baseline_retries_with_extracted_reference(
     )
 
     assert exit_code == 0
-    assert captured_reference_paths == [str(normalized_reference), str(extracted_reference)]
+    assert captured_reference_paths == [str(normalized_reference)]
     payload = json.loads(capsys.readouterr().out)
     assert payload["reference_download"]["reference_path"] == str(normalized_reference)
     assert payload["pipeline"]["feature_count"] == 1

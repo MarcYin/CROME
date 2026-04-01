@@ -10,11 +10,12 @@ import subprocess
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 import pyogrio
+from rasterio.warp import transform_bounds
 
 from crome.config import CromeDownloadRequest
 from crome.paths import (
@@ -100,6 +101,23 @@ class CromeDownloadResult:
         return self.extracted_path or self.normalized_path
 
 
+@dataclass(frozen=True, slots=True)
+class CromeSubsetResult:
+    """Local result surface for one AOI-specific CROME subset."""
+
+    feature_count: int | None
+    manifest_path: Path
+    output_root: Path
+    requested_bounds: tuple[float, float, float, float]
+    requested_crs: str
+    source_bounds: tuple[float, float, float, float] | None
+    source_layer: str | None
+    source_path: Path
+    subset_label: str
+    subset_path: Path
+    year: int
+
+
 HttpGetter = Callable[[str, float], HttpResponse]
 FileDownloader = Callable[[str, Path, float], None]
 
@@ -122,6 +140,209 @@ def download_result_to_dict(result: CromeDownloadResult) -> dict[str, Any]:
         "variant": result.variant,
         "year": result.year,
     }
+
+
+def subset_result_to_dict(result: CromeSubsetResult) -> dict[str, Any]:
+    """Return a JSON-safe summary payload for one CROME subset run."""
+
+    return {
+        "feature_count": result.feature_count,
+        "manifest_path": str(result.manifest_path),
+        "output_root": str(result.output_root),
+        "requested_bounds": list(result.requested_bounds),
+        "requested_crs": result.requested_crs,
+        "source_bounds": list(result.source_bounds) if result.source_bounds is not None else None,
+        "source_layer": result.source_layer,
+        "source_path": str(result.source_path),
+        "subset_label": result.subset_label,
+        "subset_path": str(result.subset_path),
+        "year": result.year,
+    }
+
+
+def _path_signature(path: Path) -> dict[str, object]:
+    stat = path.stat()
+    return {
+        "mtime_ns": stat.st_mtime_ns,
+        "path": str(path.resolve()),
+        "size_bytes": stat.st_size,
+    }
+
+
+def _subset_output_root(
+    reference_path: Path,
+    output_root: Path | str,
+    year: int,
+) -> Path:
+    if reference_path.parent.name == "subsets":
+        return reference_path.parent
+    if reference_path.parent.name in {"extracted", "normalized"}:
+        return reference_path.parent.parent / "subsets"
+    return crome_download_root(output_root, year, variant_label="subset") / "subsets"
+
+
+def _is_valid_subset(subset_path: Path) -> bool:
+    ensure_proj_data_env()
+    if not subset_path.exists() or subset_path.stat().st_size <= 0:
+        return False
+    try:
+        info = pyogrio.read_info(subset_path)
+        feature_count = info.get("features")
+        return isinstance(feature_count, int) and feature_count > 0
+    except Exception:
+        return False
+
+
+def materialize_crome_subset(
+    reference_path: Path | str,
+    *,
+    output_root: Path | str,
+    year: int,
+    subset_bounds: tuple[float, float, float, float],
+    subset_label: str | None,
+    requested_crs: str | None = None,
+    source_layer: str | None = None,
+    force: bool = False,
+) -> CromeSubsetResult:
+    """Clip one AOI-specific FlatGeobuf subset from a larger CROME vector source."""
+
+    ensure_proj_data_env()
+    source_path = Path(reference_path)
+    subset_root = _subset_output_root(source_path, output_root, year)
+    subset_root.mkdir(parents=True, exist_ok=True)
+
+    if source_layer is None and source_path.suffix.casefold() == ".gpkg":
+        source_layer = _canonical_reference_layer(source_path, year)
+
+    info = pyogrio.read_info(source_path, layer=source_layer)
+    source_crs = info.get("crs")
+    source_bounds = subset_bounds
+    if requested_crs is not None and isinstance(source_crs, str) and source_crs:
+        source_bounds = transform_bounds(requested_crs, source_crs, *subset_bounds, densify_pts=21)
+
+    subset_name = f"{sanitize_label(source_layer or source_path.stem, default='crome')}_{sanitize_label(subset_label, default='aoi')}.fgb"
+    subset_path = subset_root / subset_name
+    manifest_path = subset_path.with_suffix(".json")
+    expected_signature = _path_signature(source_path)
+    expected_manifest = {
+        "requested_bounds": [float(value) for value in subset_bounds],
+        "requested_crs": requested_crs,
+        "source_bounds": [float(value) for value in source_bounds],
+        "source_layer": source_layer,
+        "source_path": str(source_path),
+        "source_signature": expected_signature,
+        "subset_label": sanitize_label(subset_label, default="aoi"),
+        "year": year,
+    }
+
+    if subset_path.exists() and manifest_path.exists() and not force and _is_valid_subset(subset_path):
+        try:
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest_payload = None
+        if isinstance(manifest_payload, dict):
+            comparable = {
+                key: manifest_payload.get(key)
+                for key in (
+                    "requested_bounds",
+                    "requested_crs",
+                    "source_bounds",
+                    "source_layer",
+                    "source_path",
+                    "source_signature",
+                    "subset_label",
+                    "year",
+                )
+            }
+            if comparable == expected_manifest:
+                subset_info = pyogrio.read_info(subset_path)
+                feature_count = subset_info.get("features")
+                return CromeSubsetResult(
+                    feature_count=int(feature_count) if isinstance(feature_count, int) else None,
+                    manifest_path=manifest_path,
+                    output_root=subset_root,
+                    requested_bounds=tuple(float(value) for value in subset_bounds),
+                    requested_crs=requested_crs or (str(source_crs) if isinstance(source_crs, str) else ""),
+                    source_bounds=tuple(float(value) for value in source_bounds),
+                    source_layer=source_layer,
+                    source_path=source_path,
+                    subset_label=sanitize_label(subset_label, default="aoi"),
+                    subset_path=subset_path,
+                    year=year,
+                )
+
+    temp_subset_path = subset_path.with_suffix(".tmp.fgb")
+    if temp_subset_path.exists():
+        temp_subset_path.unlink()
+    if subset_path.exists():
+        subset_path.unlink()
+    if manifest_path.exists():
+        manifest_path.unlink()
+
+    minx, miny, maxx, maxy = (float(value) for value in source_bounds)
+    ogr2ogr = shutil.which("ogr2ogr")
+    if ogr2ogr is not None:
+        command = [
+            ogr2ogr,
+            "-f",
+            "FlatGeobuf",
+            str(temp_subset_path),
+            str(source_path),
+        ]
+        if source_layer is not None:
+            command.append(source_layer)
+        command.extend(["-spat", str(minx), str(miny), str(maxx), str(maxy)])
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise CromeDownloadError(
+                "ogr2ogr failed while clipping the CROME AOI subset: "
+                + completed.stderr.strip()
+            )
+    else:
+        frame = pyogrio.read_dataframe(
+            source_path,
+            layer=source_layer,
+            bbox=(minx, miny, maxx, maxy),
+        )
+        if frame.empty:
+            raise CromeDownloadError("No CROME reference features intersected the requested subset bounds.")
+        pyogrio.write_dataframe(frame, temp_subset_path, driver="FlatGeobuf")
+
+    if not _is_valid_subset(temp_subset_path):
+        raise CromeDownloadError("No CROME reference features intersected the requested subset bounds.")
+
+    temp_subset_path.replace(subset_path)
+    subset_info = pyogrio.read_info(subset_path)
+    feature_count = subset_info.get("features")
+    manifest_payload = {
+        **expected_manifest,
+        "feature_count": int(feature_count) if isinstance(feature_count, int) else None,
+        "manifest_path": str(manifest_path),
+        "output_root": str(subset_root),
+        "subset_path": str(subset_path),
+    }
+    manifest_path.write_text(
+        json.dumps(manifest_payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return CromeSubsetResult(
+        feature_count=int(feature_count) if isinstance(feature_count, int) else None,
+        manifest_path=manifest_path,
+        output_root=subset_root,
+        requested_bounds=tuple(float(value) for value in subset_bounds),
+        requested_crs=requested_crs or (str(source_crs) if isinstance(source_crs, str) else ""),
+        source_bounds=tuple(float(value) for value in source_bounds),
+        source_layer=source_layer,
+        source_path=source_path,
+        subset_label=sanitize_label(subset_label, default="aoi"),
+        subset_path=subset_path,
+        year=year,
+    )
 
 
 def _default_http_get(url: str, timeout_s: float) -> HttpResponse:
@@ -478,6 +699,79 @@ def _normalize_gpkg_to_flatgeobuf(
         encoding="utf-8",
     )
     return normalized_path, source_layer
+
+
+def _subset_root_for_reference(reference_path: Path) -> Path | None:
+    parent_name = reference_path.parent.name.casefold()
+    if parent_name in {"extracted", "normalized"}:
+        return reference_path.parent.parent / "subsets"
+    if parent_name == "subsets":
+        return reference_path.parent
+    return None
+
+
+def _preferred_subset_source(reference_path: Path, *, year: int) -> tuple[Path, str | None] | None:
+    parent_name = reference_path.parent.name.casefold()
+    if parent_name == "subsets":
+        return reference_path, None
+    if parent_name == "extracted" and reference_path.suffix.casefold() == ".gpkg":
+        return reference_path, _canonical_reference_layer(reference_path, year)
+    if parent_name == "normalized":
+        extracted_dir = reference_path.parent.parent / "extracted"
+        extracted_candidates = sorted(extracted_dir.glob("*.gpkg"))
+        if extracted_candidates:
+            extracted_path = extracted_candidates[0]
+            return extracted_path, _canonical_reference_layer(extracted_path, year)
+    return None
+
+
+def materialize_crome_reference_subset(
+    reference_path: Path | str,
+    *,
+    feature_raster_paths: Sequence[Path | str],
+    subset_label: str | None,
+    year: int,
+    force: bool = False,
+) -> Path:
+    """Materialize or reuse one AOI-specific CROME subset for discovered AlphaEarth rasters.
+
+    Automatic subsetting is conservative:
+    - managed national CROME sources under `extracted/` or `normalized/` are clipped
+    - existing AOI subset paths under `subsets/` are reused as-is
+    - arbitrary external vectors are left untouched
+    """
+
+    from crome.labeling import reference_source_bbox_for_feature_rasters
+
+    resolved_reference_path = Path(reference_path)
+    subset_root = _subset_root_for_reference(resolved_reference_path)
+    if subset_root is None:
+        return resolved_reference_path
+    if resolved_reference_path.parent.name.casefold() == "subsets" and not force:
+        return resolved_reference_path
+
+    preferred_source = _preferred_subset_source(resolved_reference_path, year=year)
+    if preferred_source is None:
+        return resolved_reference_path
+    source_path, source_layer = preferred_source
+
+    bbox = reference_source_bbox_for_feature_rasters(
+        source_path,
+        [Path(path) for path in feature_raster_paths],
+    )
+    if bbox is None:
+        return resolved_reference_path
+
+    subset = materialize_crome_subset(
+        source_path,
+        output_root=subset_root,
+        year=year,
+        subset_bounds=tuple(float(value) for value in bbox),
+        subset_label=subset_label,
+        source_layer=source_layer,
+        force=force,
+    )
+    return subset.subset_path
 
 
 def download_crome_reference(
