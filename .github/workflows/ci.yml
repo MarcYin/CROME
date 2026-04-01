@@ -26,3 +26,27 @@ jobs:
         run: pytest
       - name: Build package
         run: python -m build
+
+  nextflow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dev dependencies
+        run: python -m pip install -e .[dev]
+      - name: Install Nextflow
+        run: |
+          curl -fsSL https://get.nextflow.io | bash
+          mkdir -p "$HOME/.local/bin"
+          mv nextflow "$HOME/.local/bin/nextflow"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Show Nextflow version
+        run: nextflow -version
+      - name: Nextflow smoke test
+        run: pytest -q tests/test_nextflow_workflow.py

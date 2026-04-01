@@ -339,11 +339,16 @@ def prepare_tile_batch(
     )
 
 
-def run_tile_plan(tile_plan_path: Path | str) -> TilePlanRunResult:
+def run_tile_plan(tile_plan_path: Path | str, *, n_jobs_override: int | None = None) -> TilePlanRunResult:
     """Execute one prepared per-tile plan."""
 
     resolved_tile_plan_path = Path(tile_plan_path)
     payload = _load_json_payload(resolved_tile_plan_path)
+    resolved_n_jobs = (
+        int(n_jobs_override)
+        if n_jobs_override is not None
+        else int(payload.get("n_jobs", -1))
+    )
     batch_manifest_path = Path(str(payload["batch_manifest_path"]))
     result = run_baseline_pipeline(
         feature_input=payload["feature_raster_path"],
@@ -361,7 +366,7 @@ def run_tile_plan(tile_plan_path: Path | str) -> TilePlanRunResult:
         test_size=float(payload["test_size"]),
         random_state=int(payload["random_state"]),
         n_estimators=int(payload["n_estimators"]),
-        n_jobs=int(payload.get("n_jobs", -1)),
+        n_jobs=resolved_n_jobs,
         max_train_rows=(
             int(payload["max_train_rows"])
             if payload.get("max_train_rows") is not None
@@ -576,14 +581,7 @@ def main_prepare_tile_batch(argv: list[str] | None = None) -> int:
 def main_run_tile_plan(argv: list[str] | None = None) -> int:
     parser = build_run_tile_plan_parser()
     args = parser.parse_args(argv)
-    tile_plan_path = Path(args.tile_plan)
-    if args.n_jobs is not None:
-        payload = _load_json_payload(tile_plan_path)
-        payload["n_jobs"] = int(args.n_jobs)
-        override_path = tile_plan_path.parent / f"{tile_plan_path.stem}.n_jobs_{args.n_jobs}.json"
-        override_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        tile_plan_path = override_path
-    result = run_tile_plan(tile_plan_path)
+    result = run_tile_plan(args.tile_plan, n_jobs_override=args.n_jobs)
     payload = _pipeline_result_payload(result.pipeline)
     payload["batch_manifest_path"] = str(result.batch_manifest_path)
     payload["tile_plan_path"] = str(result.tile_plan_path)

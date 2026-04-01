@@ -211,3 +211,54 @@ def test_cli_run_tile_plan_and_pooled_training(tmp_path: Path, capsys) -> None:
     assert metrics["evaluation_mode"] in {"feature_holdout", "train_only_no_holdout"}
     assert metrics["n_jobs"] == 2
     assert Path(pooled_payload["pooled_manifest_path"]).exists()
+
+
+def test_cli_run_tile_plan_n_jobs_override_does_not_write_sidecar(tmp_path: Path, capsys) -> None:
+    output_root = tmp_path / "outputs"
+    image_root = output_root / "images"
+    image_root.mkdir(parents=True)
+    feature_a = image_root / "tile_a.tif"
+    _write_feature_raster(feature_a, x_origin=0.0)
+    manifest_path = output_root / "manifests" / "run.json"
+    _write_manifest(
+        manifest_path,
+        [("GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL/tile_a", feature_a)],
+    )
+    reference_path = _write_managed_reference(tmp_path)
+
+    prepare_exit = cli.main(
+        [
+            "prepare-tile-batch",
+            "--manifest-path",
+            str(manifest_path),
+            "--reference-path",
+            str(reference_path),
+            "--year",
+            "2024",
+            "--output-root",
+            str(output_root),
+            "--aoi-label",
+            "single-tile",
+            "--n-estimators",
+            "10",
+            "--n-jobs",
+            "2",
+        ]
+    )
+    assert prepare_exit == 0
+    prepare_payload = json.loads(capsys.readouterr().out)
+    tile_manifest_path = Path(prepare_payload["tile_manifest_paths"][0])
+
+    run_exit = cli.main(
+        [
+            "run-tile-plan",
+            "--tile-plan",
+            str(tile_manifest_path),
+            "--n-jobs",
+            "1",
+        ]
+    )
+    assert run_exit == 0
+    run_payload = json.loads(capsys.readouterr().out)
+    assert run_payload["tile_plan_path"] == str(tile_manifest_path)
+    assert not (tile_manifest_path.parent / f"{tile_manifest_path.stem}.n_jobs_1.json").exists()
