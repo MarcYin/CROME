@@ -79,10 +79,16 @@ crome build-training-table-from-cache \
   --cache-manifest ./outputs/training/tiles/<model-namespace>/TRAIN_IMAGE_FULL_2024/dataset/sample_cache_manifest.json \
   --cache-manifest ./outputs/training/tiles/<model-namespace>/TRAIN_IMAGE_LEFT_2024/dataset/sample_cache_manifest.json \
   --output-dir ./outputs/training/global-2024
+crome train-pooled-model \
+  --pipeline-manifest ./outputs/training/<model-namespace>/TRAIN_RUN_A_2024/pipeline.json \
+  --pipeline-manifest ./outputs/training/<model-namespace>/TRAIN_RUN_B_2024/pipeline.json \
+  --output-dir ./outputs/training/global-2024 \
+  --max-train-rows 50000
 ```
 
 The tile namespaces are derived from the label-transfer mode, reference settings, and model/training configuration so repeated runs against the same AlphaEarth image tiles do not overwrite each other.
 For very large pooled tables, `crome train-model` also accepts `--max-train-rows` so global fits can cap the training subset after the holdout split while still evaluating on the full held-out tiles.
+`crome train-pooled-model` wraps the pooled path end to end by reading prior `pipeline.json` files, gathering their cached sample manifests, building the combined table, and training the pooled model in one command.
 
 You can set a user-specific default artifact root with:
 

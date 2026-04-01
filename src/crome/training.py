@@ -49,6 +49,18 @@ class TrainedModelResult:
 
 
 @dataclass(frozen=True, slots=True)
+class PooledTrainingResult:
+    """Outputs from pooled model training driven by pipeline manifests."""
+
+    dataset_label_mapping_path: Path
+    pipeline_manifest_paths: tuple[Path, ...]
+    pooled_manifest_path: Path
+    sample_cache_manifest_paths: tuple[Path, ...]
+    trained_model: TrainedModelResult
+    training_table: TrainingTableResult
+
+
+@dataclass(frozen=True, slots=True)
 class TrainingRasterPair:
     """One aligned feature/label raster pair plus optional lineage metadata."""
 
@@ -524,6 +536,7 @@ def build_training_table_from_cache_manifests(
     output_dir.mkdir(parents=True, exist_ok=True)
     table_path = output_dir / "training_table.pkl"
     metadata_path = output_dir / "training_table.json"
+    label_mapping_path = output_dir / "labels.json"
     sample_cache_manifest_path = output_dir / "sample_cache_sources.json"
 
     entries_by_key: dict[str, dict[str, object]] = {}
@@ -581,6 +594,7 @@ def build_training_table_from_cache_manifests(
         raise ValueError("No cached sample rows were loaded.")
 
     global_label_to_id = {label: idx for idx, label in enumerate(sorted(all_labels))}
+    global_id_to_label = {str(idx): label for label, idx in sorted(global_label_to_id.items(), key=lambda item: item[1])}
     remapped_tables: list[pd.DataFrame] = []
     sources: list[dict[str, object]] = []
     for frame, metadata in loaded_entries:
@@ -608,6 +622,19 @@ def build_training_table_from_cache_manifests(
     table = pd.concat(remapped_tables, ignore_index=True)
     table.to_pickle(table_path)
 
+    label_mapping_path.write_text(
+        json.dumps(
+            {
+                "id_to_label": global_id_to_label,
+                "label_column": "label_id",
+                "label_to_id": global_label_to_id,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
     sample_cache_manifest_path.write_text(
         json.dumps(
             {
@@ -631,7 +658,10 @@ def build_training_table_from_cache_manifests(
                 "columns": list(feature_names),
                 "feature_count": int(table["feature_id"].nunique()) if "feature_id" in table.columns else None,
                 "feature_ids": sorted(str(value) for value in table["feature_id"].unique()),
+                "id_to_label": global_id_to_label,
                 "label_column": "label_id",
+                "label_mapping_path": str(label_mapping_path),
+                "label_to_id": global_label_to_id,
                 "lineage_columns": ["feature_id", "source_image_id"],
                 "row_count": int(table.shape[0]),
                 "sample_cache_manifest_path": str(sample_cache_manifest_path),
@@ -653,6 +683,177 @@ def build_training_table_from_cache_manifests(
         sample_cache_manifest_path=sample_cache_manifest_path,
         sample_cache_root=None,
         table_path=table_path,
+    )
+
+
+def _sample_cache_manifest_paths_from_pipeline_payload(payload: dict[str, object]) -> tuple[Path, ...]:
+    explicit_paths = payload.get("sample_cache_manifest_paths")
+    if isinstance(explicit_paths, list):
+        paths = [Path(value) for value in explicit_paths if isinstance(value, str)]
+        if paths:
+            return tuple(paths)
+    features = payload.get("features")
+    if not isinstance(features, list):
+        raise ValueError("Pipeline manifest does not contain sample_cache_manifest_paths.")
+    paths = []
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+        sample_cache_manifest_path = feature.get("sample_cache_manifest_path")
+        if isinstance(sample_cache_manifest_path, str):
+            paths.append(Path(sample_cache_manifest_path))
+    if not paths:
+        raise ValueError("Pipeline manifest does not reference any sample_cache_manifest.json files.")
+    return tuple(paths)
+
+
+def _load_pipeline_pooling_inputs(
+    pipeline_manifest_paths: Sequence[Path | str],
+) -> tuple[tuple[Path, ...], tuple[Path, ...], dict[str, object], list[dict[str, object]]]:
+    resolved_pipeline_paths = tuple(dict.fromkeys(Path(path).resolve() for path in pipeline_manifest_paths))
+    if not resolved_pipeline_paths:
+        raise ValueError("At least one pipeline manifest path is required.")
+
+    compatibility: dict[str, object] | None = None
+    sample_cache_manifest_paths: list[Path] = []
+    pipeline_sources: list[dict[str, object]] = []
+    for pipeline_manifest_path in resolved_pipeline_paths:
+        payload = json.loads(pipeline_manifest_path.read_text(encoding="utf-8"))
+        label_mode = payload.get("label_mode")
+        cache_paths = _sample_cache_manifest_paths_from_pipeline_payload(payload)
+        pipeline_sources.append(
+            {
+                "aoi_label": payload.get("aoi_label"),
+                "feature_count": payload.get("feature_count"),
+                "label_mode": label_mode,
+                "pipeline_manifest_path": str(pipeline_manifest_path),
+                "reference_input_path": payload.get("reference_input_path"),
+                "reference_path": payload.get("reference_path"),
+                "sample_cache_manifest_paths": [str(path) for path in cache_paths],
+                "sample_cache_root": payload.get("sample_cache_root"),
+                "year": payload.get("year"),
+            }
+        )
+        for cache_path in cache_paths:
+            cache_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            cache_metadata = cache_payload.get("cache_metadata")
+            if not isinstance(cache_metadata, dict):
+                raise ValueError(f"Sample cache manifest is missing cache_metadata: {cache_path}")
+            if label_mode is not None and cache_metadata.get("label_mode") != label_mode:
+                raise ValueError(
+                    f"Pipeline label_mode does not match sample cache metadata for {cache_path}: "
+                    f"{label_mode!r} != {cache_metadata.get('label_mode')!r}"
+                )
+            current = {
+                "label_column": cache_metadata.get("label_column"),
+                "label_mode": cache_metadata.get("label_mode"),
+                "overlap_policy": cache_metadata.get("overlap_policy"),
+                "reference_name": cache_metadata.get("reference_name"),
+            }
+            if compatibility is None:
+                compatibility = current
+            elif current != compatibility:
+                raise ValueError(
+                    "Pipeline manifests are not compatible for pooled training. "
+                    f"Expected {compatibility}, got {current} from {cache_path}."
+                )
+            sample_cache_manifest_paths.append(cache_path.resolve())
+
+    resolved_sample_cache_manifest_paths = tuple(dict.fromkeys(sample_cache_manifest_paths))
+    if not resolved_sample_cache_manifest_paths:
+        raise ValueError("No sample cache manifests were resolved from the provided pipeline manifests.")
+    return (
+        resolved_pipeline_paths,
+        resolved_sample_cache_manifest_paths,
+        compatibility or {},
+        pipeline_sources,
+    )
+
+
+def train_pooled_model_from_pipeline_manifests(
+    pipeline_manifest_paths: Sequence[Path | str],
+    output_dir: Path | str,
+    *,
+    test_size: float = 0.2,
+    random_state: int = 42,
+    n_estimators: int = 200,
+    max_train_rows: int | None = None,
+) -> PooledTrainingResult:
+    """Build and train one pooled model from prior batch pipeline manifests."""
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dataset_dir = output_dir / "dataset"
+    model_dir = output_dir / "model"
+    pooled_manifest_path = output_dir / "pooled_training.json"
+
+    (
+        resolved_pipeline_paths,
+        resolved_sample_cache_manifest_paths,
+        compatibility,
+        pipeline_sources,
+    ) = _load_pipeline_pooling_inputs(pipeline_manifest_paths)
+
+    training_table = build_training_table_from_cache_manifests(
+        resolved_sample_cache_manifest_paths,
+        dataset_dir,
+    )
+    dataset_label_mapping_path = dataset_dir / "labels.json"
+    trained_model = train_random_forest(
+        training_table.table_path,
+        model_dir,
+        test_size=test_size,
+        random_state=random_state,
+        n_estimators=n_estimators,
+        max_train_rows=max_train_rows,
+        label_mapping_path=dataset_label_mapping_path if dataset_label_mapping_path.exists() else None,
+    )
+    training_metadata = json.loads(training_table.metadata_path.read_text(encoding="utf-8"))
+    pooled_manifest_path.write_text(
+        json.dumps(
+            {
+                "compatibility": compatibility,
+                "dataset_label_mapping_path": str(dataset_label_mapping_path),
+                "metrics_path": str(trained_model.metrics_path),
+                "model_path": str(trained_model.model_path),
+                "model_parameters": {
+                    "max_train_rows": max_train_rows,
+                    "n_estimators": n_estimators,
+                    "random_state": random_state,
+                    "test_size": test_size,
+                },
+                "pipeline_manifest_paths": [str(path) for path in resolved_pipeline_paths],
+                "pipeline_sources": pipeline_sources,
+                "sample_cache_manifest_path": (
+                    str(training_table.sample_cache_manifest_path)
+                    if training_table.sample_cache_manifest_path is not None
+                    else None
+                ),
+                "sample_cache_manifest_paths": [str(path) for path in resolved_sample_cache_manifest_paths],
+                "training_row_count": training_table.row_count,
+                "training_table_metadata_path": str(training_table.metadata_path),
+                "training_table_path": str(training_table.table_path),
+                "years": sorted(
+                    {
+                        int(source["year"])
+                        for source in pipeline_sources
+                        if isinstance(source.get("year"), int)
+                    }
+                ),
+                "feature_ids": training_metadata.get("feature_ids"),
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return PooledTrainingResult(
+        dataset_label_mapping_path=dataset_label_mapping_path,
+        pipeline_manifest_paths=resolved_pipeline_paths,
+        pooled_manifest_path=pooled_manifest_path,
+        sample_cache_manifest_paths=resolved_sample_cache_manifest_paths,
+        trained_model=trained_model,
+        training_table=training_table,
     )
 
 
@@ -982,6 +1183,29 @@ def build_training_table_from_cache_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_train_pooled_model_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Build and train one pooled model from one or more batch pipeline manifests."
+    )
+    parser.add_argument(
+        "--pipeline-manifest",
+        action="append",
+        required=True,
+        help="Path to one pipeline.json produced by a prior run-baseline-pipeline or download-run-baseline run.",
+    )
+    parser.add_argument("--output-dir", required=True, help="Directory for pooled dataset and model outputs.")
+    parser.add_argument("--test-size", type=float, default=0.2, help="Evaluation holdout fraction.")
+    parser.add_argument("--random-state", type=int, default=42, help="Random seed.")
+    parser.add_argument("--n-estimators", type=int, default=200, help="Random forest tree count.")
+    parser.add_argument(
+        "--max-train-rows",
+        type=int,
+        default=None,
+        help="Optional cap on the number of training rows used to fit the pooled model after holdout splitting.",
+    )
+    return parser
+
+
 def main_build_training_table(argv: list[str] | None = None) -> int:
     parser = build_training_table_parser()
     args = parser.parse_args(argv)
@@ -1025,6 +1249,7 @@ def main_build_training_table_from_cache(argv: list[str] | None = None) -> int:
             {
                 "columns": list(result.columns),
                 "label_column": result.label_column,
+                "label_mapping_path": str(Path(args.output_dir) / "labels.json"),
                 "metadata_path": str(result.metadata_path),
                 "row_count": result.row_count,
                 "sample_cache_manifest_path": (
@@ -1034,6 +1259,37 @@ def main_build_training_table_from_cache(argv: list[str] | None = None) -> int:
                 ),
                 "sample_cache_root": None,
                 "table_path": str(result.table_path),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def main_train_pooled_model(argv: list[str] | None = None) -> int:
+    parser = build_train_pooled_model_parser()
+    args = parser.parse_args(argv)
+    result = train_pooled_model_from_pipeline_manifests(
+        args.pipeline_manifest,
+        args.output_dir,
+        test_size=args.test_size,
+        random_state=args.random_state,
+        n_estimators=args.n_estimators,
+        max_train_rows=args.max_train_rows,
+    )
+    print(
+        json.dumps(
+            {
+                "dataset_label_mapping_path": str(result.dataset_label_mapping_path),
+                "metrics_path": str(result.trained_model.metrics_path),
+                "model_path": str(result.trained_model.model_path),
+                "pipeline_manifest_paths": [str(path) for path in result.pipeline_manifest_paths],
+                "pooled_manifest_path": str(result.pooled_manifest_path),
+                "row_count": result.trained_model.row_count,
+                "sample_cache_manifest_paths": [str(path) for path in result.sample_cache_manifest_paths],
+                "training_metadata_path": str(result.training_table.metadata_path),
+                "training_table_path": str(result.training_table.table_path),
             },
             indent=2,
             sort_keys=True,

@@ -492,6 +492,80 @@ def test_cli_build_training_table_from_cache(tmp_path: Path, capsys) -> None:
     assert Path(payload["table_path"]).exists()
 
 
+def test_cli_train_pooled_model_from_pipeline_manifests(tmp_path: Path, capsys) -> None:
+    reference_geojson = tmp_path / "crome.geojson"
+    output_root = tmp_path / "outputs"
+    pooled_output = tmp_path / "pooled"
+    _write_reference_geojson(reference_geojson)
+
+    pipeline_manifest_paths: list[str] = []
+    for name in ("tile_a", "tile_b", "tile_c"):
+        feature_dir = tmp_path / name
+        feature_dir.mkdir()
+        feature_raster = feature_dir / f"{name}.tif"
+        manifest_path = feature_dir / "manifests" / "run.json"
+        _write_feature_raster(feature_raster)
+        _write_manifest(manifest_path, [(name.upper(), feature_raster)])
+
+        assert (
+            cli.main(
+                [
+                    "run-baseline-pipeline",
+                    "--manifest-path",
+                    str(manifest_path),
+                    "--reference-path",
+                    str(reference_geojson),
+                    "--year",
+                    "2024",
+                    "--aoi-label",
+                    name,
+                    "--output-root",
+                    str(output_root),
+                    "--label-mode",
+                    "centroid_to_pixel",
+                    "--no-predict",
+                ]
+            )
+            == 0
+        )
+        pipeline_payload = json.loads(capsys.readouterr().out)
+        pipeline_manifest_paths.append(pipeline_payload["pipeline_manifest_path"])
+
+    assert (
+        cli.main(
+            [
+                "train-pooled-model",
+                "--pipeline-manifest",
+                pipeline_manifest_paths[0],
+                "--pipeline-manifest",
+                pipeline_manifest_paths[1],
+                "--pipeline-manifest",
+                pipeline_manifest_paths[2],
+                "--output-dir",
+                str(pooled_output),
+                "--n-estimators",
+                "10",
+                "--max-train-rows",
+                "3",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert Path(payload["dataset_label_mapping_path"]).exists()
+    assert Path(payload["training_table_path"]).exists()
+    assert Path(payload["training_metadata_path"]).exists()
+    assert Path(payload["model_path"]).exists()
+    assert Path(payload["metrics_path"]).exists()
+    assert Path(payload["pooled_manifest_path"]).exists()
+    assert len(payload["pipeline_manifest_paths"]) == 3
+    assert len(payload["sample_cache_manifest_paths"]) == 3
+
+    metrics = json.loads(Path(payload["metrics_path"]).read_text(encoding="utf-8"))
+    assert metrics["evaluation_mode"] == "feature_holdout"
+    assert metrics["training_subsample"]["max_train_rows"] == 3
+
+
 def test_cli_download_run_baseline(monkeypatch, tmp_path: Path, capsys) -> None:
     feature_dir = tmp_path / "raw"
     feature_dir.mkdir()

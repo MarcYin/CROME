@@ -53,6 +53,13 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[training_table_from_cache_parser],
         add_help=False,
     )
+    pooled_model_parser = training.build_train_pooled_model_parser()
+    subparsers.add_parser(
+        "train-pooled-model",
+        help=pooled_model_parser.description or "Build and train one pooled model from prior pipeline manifests.",
+        parents=[pooled_model_parser],
+        add_help=False,
+    )
     train_model_parser = training.build_train_model_parser()
     subparsers.add_parser(
         "train-model",
@@ -98,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
         return training.main_build_training_table(forwarded)
     if args.command == "build-training-table-from-cache":
         return training.main_build_training_table_from_cache(forwarded)
+    if args.command == "train-pooled-model":
+        return training.main_train_pooled_model(forwarded)
     if args.command == "train-model":
         return training.main_train_model(forwarded)
     if args.command == "predict-map":
