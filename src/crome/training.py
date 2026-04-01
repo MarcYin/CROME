@@ -9,6 +9,7 @@ import pickle
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -662,6 +663,7 @@ def train_random_forest(
     test_size: float = 0.2,
     random_state: int = 42,
     n_estimators: int = 200,
+    max_train_rows: int | None = None,
     label_mapping_path: Path | str | None = None,
 ) -> TrainedModelResult:
     """Train a random-forest classifier from a prepared training table."""
@@ -677,12 +679,12 @@ def train_random_forest(
     ]
     if tuple(feature_names) != alphaearth_feature_columns():
         raise ValueError("Training table is missing the canonical AlphaEarth feature columns.")
-    X = table[feature_names]
-    y = table[label_column]
 
     if table.empty:
         raise ValueError("Training table is empty.")
 
+    all_indices = np.arange(len(table))
+    y = table[label_column]
     class_counts = y.value_counts().sort_index()
 
     evaluation_mode = "pixel_holdout"
@@ -692,6 +694,7 @@ def train_random_forest(
     )
     train_feature_ids: list[str] | None = None
     test_feature_ids: list[str] | None = None
+    training_subsample: dict[str, Any] | None = None
 
     feature_groups = (
         table["feature_id"]
@@ -699,10 +702,8 @@ def train_random_forest(
         else None
     )
     if len(class_counts) < 2:
-        X_train = X
-        y_train = y
-        X_test = None
-        y_test = None
+        train_idx = all_indices
+        test_idx = None
         evaluation_mode = "train_only_single_class"
         evaluation_note = (
             "Model fitted on the full training table because this tile exposes only one labeled class."
@@ -716,12 +717,8 @@ def train_random_forest(
         )
         if feature_groups is not None and 0.0 < test_size < 1.0:
             splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
-            train_idx, test_idx = next(splitter.split(X, y, groups=feature_groups))
-            X_train = X.iloc[train_idx]
-            y_train = y.iloc[train_idx]
-            X_test = X.iloc[test_idx]
-            y_test = y.iloc[test_idx]
-            if y_train.nunique() >= 2 and not X_test.empty:
+            train_idx, test_idx = next(splitter.split(all_indices, y, groups=feature_groups))
+            if y.iloc[train_idx].nunique() >= 2 and len(test_idx) > 0:
                 evaluation_mode = "feature_holdout"
                 evaluation_note = (
                     "Holdout metrics are computed by holding out whole native AlphaEarth feature rasters "
@@ -730,36 +727,30 @@ def train_random_forest(
                 train_feature_ids = sorted(str(value) for value in table.iloc[train_idx]["feature_id"].unique())
                 test_feature_ids = sorted(str(value) for value in table.iloc[test_idx]["feature_id"].unique())
             elif can_pixel_hold_out:
-                X_train, X_test, y_train, y_test = train_test_split(
-                    X,
-                    y,
+                train_idx, test_idx = train_test_split(
+                    all_indices,
                     test_size=test_size,
                     random_state=random_state,
                     stratify=y,
                 )
             else:
-                X_train = X
-                y_train = y
-                X_test = None
-                y_test = None
+                train_idx = all_indices
+                test_idx = None
                 evaluation_mode = "train_only_no_holdout"
                 evaluation_note = (
                     "Model fitted on the full training table because neither feature-level nor pixel-level "
                     "holdout was valid for the available class counts."
                 )
         elif can_pixel_hold_out:
-            X_train, X_test, y_train, y_test = train_test_split(
-                X,
-                y,
+            train_idx, test_idx = train_test_split(
+                all_indices,
                 test_size=test_size,
                 random_state=random_state,
                 stratify=y,
             )
         else:
-            X_train = X
-            y_train = y
-            X_test = None
-            y_test = None
+            train_idx = all_indices
+            test_idx = None
             evaluation_mode = "train_only_no_holdout"
             evaluation_note = (
                 "Model fitted on the full training table because the requested holdout split was not "
@@ -771,8 +762,109 @@ def train_random_forest(
             random_state=random_state,
             n_jobs=-1,
         )
+    pre_subsample_train_row_count = int(len(train_idx))
+    if max_train_rows is not None and max_train_rows <= 0:
+        raise ValueError("max_train_rows must be positive when provided.")
+    if max_train_rows is not None and len(train_idx) > max_train_rows:
+        sampling_columns = [label_column]
+        if "feature_id" in table.columns:
+            sampling_columns.append("feature_id")
+        train_frame = table.iloc[train_idx][sampling_columns].copy()
+        if "feature_id" in train_frame.columns and train_frame["feature_id"].nunique() > 1:
+            feature_counts = train_frame["feature_id"].value_counts().sort_index()
+            proportional = feature_counts / feature_counts.sum() * int(max_train_rows)
+            quotas = np.floor(proportional).astype(int)
+            quotas = quotas.clip(lower=1, upper=feature_counts)
+            remaining = int(max_train_rows) - int(quotas.sum())
+            if remaining > 0:
+                remainders = (proportional - quotas).sort_values(ascending=False)
+                for feature_id in remainders.index:
+                    if remaining <= 0:
+                        break
+                    if quotas.loc[feature_id] >= feature_counts.loc[feature_id]:
+                        continue
+                    quotas.loc[feature_id] += 1
+                    remaining -= 1
+            elif remaining < 0:
+                remainders = (proportional - quotas).sort_values()
+                for feature_id in remainders.index:
+                    if remaining >= 0:
+                        break
+                    if quotas.loc[feature_id] <= 1:
+                        continue
+                    quotas.loc[feature_id] -= 1
+                    remaining += 1
+
+            sampled_frames: list[pd.DataFrame] = []
+            for offset, (feature_id, quota) in enumerate(quotas.items()):
+                feature_frame = train_frame.loc[train_frame["feature_id"] == feature_id]
+                quota = int(min(max(quota, 1), len(feature_frame)))
+                if quota >= len(feature_frame):
+                    sampled_frames.append(feature_frame)
+                    continue
+                label_counts = feature_frame[label_column].value_counts()
+                can_stratify = (
+                    label_counts.min() >= 2
+                    and quota >= label_counts.size
+                    and (len(feature_frame) - quota) >= label_counts.size
+                )
+                if can_stratify:
+                    sampled_index, _ = train_test_split(
+                        feature_frame.index,
+                        train_size=quota,
+                        random_state=random_state + offset,
+                        stratify=feature_frame[label_column],
+                    )
+                    sampled_frames.append(feature_frame.loc[sampled_index])
+                else:
+                    sampled_frames.append(
+                        feature_frame.sample(n=quota, random_state=random_state + offset)
+                    )
+            sampled_train = pd.concat(sampled_frames, axis=0, ignore_index=False)
+            sampled_train = sampled_train.sample(frac=1.0, random_state=random_state)
+            sampling_strategy = "per_feature_label_stratified"
+        else:
+            label_counts = train_frame[label_column].value_counts()
+            can_stratify = (
+                label_counts.min() >= 2
+                and int(max_train_rows) >= label_counts.size
+                and (len(train_frame) - int(max_train_rows)) >= label_counts.size
+            )
+            if can_stratify:
+                sampled_index, _ = train_test_split(
+                    train_frame.index,
+                    train_size=int(max_train_rows),
+                    random_state=random_state,
+                    stratify=train_frame[label_column],
+                )
+                sampled_train = train_frame.loc[sampled_index]
+                sampling_strategy = "label_stratified"
+            else:
+                sampled_train = train_frame.sample(n=int(max_train_rows), random_state=random_state)
+                sampling_strategy = "uniform_random"
+        train_idx = sampled_train.index.to_numpy()
+        training_subsample = {
+            "applied": True,
+            "input_row_count": pre_subsample_train_row_count,
+            "max_train_rows": int(max_train_rows),
+            "output_row_count": int(len(train_idx)),
+            "strategy": sampling_strategy,
+        }
+        evaluation_note = (
+            f"{evaluation_note} Training rows were capped at {int(max_train_rows)} via {sampling_strategy} "
+            "sampling after the holdout split."
+        )
+    train_frame = table.iloc[train_idx]
+    X_train = train_frame[feature_names]
+    y_train = train_frame[label_column]
+    fit_row_count = int(len(X_train))
     model.fit(X_train, y_train)
-    if X_test is not None and y_test is not None:
+    if test_idx is not None:
+        del X_train
+        del train_frame
+        test_frame = table.iloc[test_idx]
+        X_test = test_frame[feature_names]
+        y_test = test_frame[label_column]
         y_pred = model.predict(X_test)
         accuracy = accuracy_score(y_test, y_pred)
         classification = classification_report(y_test, y_pred, output_dict=True)
@@ -802,14 +894,18 @@ def train_random_forest(
             if "feature_id" in table.columns
             else None
         ),
+        "fit_row_count": fit_row_count,
+        "holdout_row_count": int(len(test_idx)) if test_idx is not None else 0,
         "label_column": label_column,
         "label_mapping": label_mapping,
         "macro_f1": macro_f1,
         "model_type": "RandomForestClassifier",
+        "pre_subsample_train_row_count": pre_subsample_train_row_count,
         "row_count": int(table.shape[0]),
         "test_feature_ids": test_feature_ids,
         "test_size": test_size,
         "train_feature_ids": train_feature_ids,
+        "training_subsample": training_subsample,
         "training_accuracy": training_accuracy,
         "weighted_f1": weighted_f1,
     }
@@ -856,6 +952,12 @@ def build_train_model_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-size", type=float, default=0.2, help="Evaluation holdout fraction.")
     parser.add_argument("--random-state", type=int, default=42, help="Random seed.")
     parser.add_argument("--n-estimators", type=int, default=200, help="Random forest tree count.")
+    parser.add_argument(
+        "--max-train-rows",
+        type=int,
+        default=None,
+        help="Optional cap on the number of training rows used to fit the model after holdout splitting.",
+    )
     parser.add_argument(
         "--label-mapping",
         default=None,
@@ -949,6 +1051,7 @@ def main_train_model(argv: list[str] | None = None) -> int:
         test_size=args.test_size,
         random_state=args.random_state,
         n_estimators=args.n_estimators,
+        max_train_rows=args.max_train_rows,
         label_mapping_path=args.label_mapping,
     )
     print(

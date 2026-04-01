@@ -24,6 +24,7 @@ crome download-run-baseline --year 2017 --aoi-label east-anglia --bbox -1 51 0 5
 crome rasterize-reference --feature-raster alphaearth.tif --reference-path crome.geojson --year 2024 --aoi-label east-anglia --output-root ./outputs
 crome build-training-table --feature-raster alphaearth.tif --label-raster ./outputs/reference/crome_hex/REF_crome_hex_east-anglia_2024/labels.tif --label-mapping ./outputs/reference/crome_hex/REF_crome_hex_east-anglia_2024/labels.json --output-dir ./outputs/training
 crome build-training-table-from-cache --cache-manifest ./outputs/training/tiles/<model-namespace>/TRAIN_IMAGE_FULL_2024/dataset/sample_cache_manifest.json --output-dir ./outputs/training/global-2024
+crome train-model --training-table ./outputs/training/global-2024/training_table.pkl --output-dir ./outputs/training/global-2024/model --max-train-rows 50000
 crome train-model --training-table ./outputs/training/training_table.pkl --output-dir ./outputs/model --label-mapping ./outputs/reference/crome_hex/REF_crome_hex_east-anglia_2024/labels.json
 crome predict-map --feature-raster alphaearth.tif --model-path ./outputs/model/model.pkl --output-raster ./outputs/prediction.tif
 crome run-baseline-pipeline --feature-input ./download-output --reference-path crome.geojson --year 2024 --aoi-label east-anglia --output-root ./outputs
@@ -35,6 +36,7 @@ If you do not pass `--reference-path`, the workflow now auto-downloads the natio
 When multiple native rasters are present, the batch pipeline keeps one global CROME label mapping across the run, but it now writes labels, training tables, models, and predictions under tile-specific roots keyed by the AlphaEarth `feature_id` or source image id.
 Those tile roots are also namespaced by the label-transfer and model configuration so centroid and polygon runs on the same AlphaEarth tiles do not overwrite each other.
 Each batch run still writes a summary `pipeline.json` and `qc.json`, while each tile also gets its own training/model artifacts, reusable `sample_cache_manifest.json`, and `metrics.json` with `evaluation_mode`, `accuracy`, `macro_f1`, and `weighted_f1` when a holdout split is available.
+For large pooled or global tables, `train-model` can cap only the training side of the split via `--max-train-rows`, which keeps held-out tile evaluation intact while making very dense polygon-fill tables tractable.
 That cache layout keeps later global model training efficient because `build-training-table-from-cache` can combine per-tile cached samples without rereading the original feature rasters.
 `download-crome` resolves the DEFRA search results and landing-page `files` list, prefers the national `.gpkg.zip` asset for the requested year, and automatically falls back to `- Complete` nationwide releases for older years such as 2016 and 2017.
 The default label mode is `centroid_to_pixel`, so each CROME hexagon contributes supervision at the single AlphaEarth pixel containing its centroid. Pass `--label-mode polygon_to_pixel` if you intentionally want polygon-fill training labels.

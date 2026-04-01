@@ -235,6 +235,47 @@ def test_end_to_end_pipeline(tmp_path: Path) -> None:
     assert mapping["reference_feature_count"] == 2
 
 
+def test_train_random_forest_supports_training_row_cap(tmp_path: Path) -> None:
+    rows: list[dict[str, object]] = []
+    feature_ids = ["tile_a", "tile_b", "tile_c", "tile_d"]
+    for feature_offset, feature_id in enumerate(feature_ids):
+        for label_id in (0, 1):
+            for sample_idx in range(40):
+                value = float(feature_offset * 10 + label_id * 100 + sample_idx)
+                row = {band: value for band in ALPHAEARTH_BANDS}
+                row["feature_id"] = feature_id
+                row["label_id"] = label_id
+                rows.append(row)
+    table = pd.DataFrame(rows)
+    table_path = tmp_path / "training_table.pkl"
+    table.to_pickle(table_path)
+
+    trained = train_random_forest(
+        table_path,
+        tmp_path / "model",
+        test_size=0.25,
+        random_state=7,
+        n_estimators=10,
+        max_train_rows=30,
+    )
+    metrics = json.loads(trained.metrics_path.read_text(encoding="utf-8"))
+
+    assert metrics["evaluation_mode"] == "feature_holdout"
+    assert metrics["row_count"] == 320
+    assert metrics["pre_subsample_train_row_count"] == 240
+    assert metrics["fit_row_count"] == 30
+    assert metrics["holdout_row_count"] == 80
+    assert metrics["training_subsample"] == {
+        "applied": True,
+        "input_row_count": 240,
+        "max_train_rows": 30,
+        "output_row_count": 30,
+        "strategy": "per_feature_label_stratified",
+    }
+    assert metrics["macro_f1"] is not None
+    assert metrics["weighted_f1"] is not None
+
+
 def test_rasterize_reference_supports_gpkg_sources(tmp_path: Path) -> None:
     feature_raster = tmp_path / "alphaearth.tif"
     reference_gpkg = tmp_path / "crome.gpkg"

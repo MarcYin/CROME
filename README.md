@@ -82,6 +82,7 @@ crome build-training-table-from-cache \
 ```
 
 The tile namespaces are derived from the label-transfer mode, reference settings, and model/training configuration so repeated runs against the same AlphaEarth image tiles do not overwrite each other.
+For very large pooled tables, `crome train-model` also accepts `--max-train-rows` so global fits can cap the training subset after the holdout split while still evaluating on the full held-out tiles.
 
 You can set a user-specific default artifact root with:
 
