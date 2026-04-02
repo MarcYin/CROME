@@ -24,7 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ee = [
-  "edown>=0.1.1",
+  "edown>=0.2.0",
 ]
 dev = [
   "build>=1.2",

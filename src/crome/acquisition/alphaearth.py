@@ -43,7 +43,7 @@ def _load_edown() -> Any:
     except ImportError as exc:
         raise RuntimeError(
             "edown is required for AlphaEarth downloads. Install `crome[ee]` "
-            "or `pip install edown>=0.1.1` in the active environment."
+            "or `pip install edown>=0.2.0` in the active environment."
         ) from exc
 
     return SimpleNamespace(AOI=AOI, DownloadConfig=DownloadConfig, download_images=download_images)

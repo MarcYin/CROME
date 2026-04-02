@@ -64,5 +64,5 @@ def test_load_edown_error_mentions_supported_install_path(monkeypatch) -> None:
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    with pytest.raises(RuntimeError, match="pip install edown>=0.1.1"):
+    with pytest.raises(RuntimeError, match="pip install edown>=0.2.0"):
         _load_edown()
