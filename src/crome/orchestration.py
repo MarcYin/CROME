@@ -183,6 +183,7 @@ def prepare_tile_batch(
     discovered = discover_feature_rasters(
         feature_input=resolved_feature_input,
         manifest_path=resolved_manifest_path,
+        requested_year=year,
     )
     resolved_reference_path = materialize_crome_reference_subset(
         resolved_reference_input,

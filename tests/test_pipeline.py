@@ -143,11 +143,17 @@ def _write_manifest(
     *,
     aoi_bounds: tuple[float, float, float, float] | None = None,
     chunk_count: int | None = None,
+    manifest_year: int | None = None,
+    image_years: dict[str, int] | None = None,
 ) -> None:
     output_root = path.parent.parent if path.parent.name == "manifests" else path.parent
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "config": {"output_root": str(output_root)},
+        "config": {
+            "output_root": str(output_root),
+            "start_date": f"{manifest_year}-01-01" if manifest_year is not None else None,
+            "end_date": f"{manifest_year + 1}-01-01" if manifest_year is not None else None,
+        },
         "download": {
             "output_root": str(output_root),
             "results": [
@@ -165,6 +171,11 @@ def _write_manifest(
             "aoi_bounds": list(aoi_bounds) if aoi_bounds is not None else None,
             "images": [
                 {
+                    "acquisition_time_utc": (
+                        f"{image_years[image_id]}-01-01T00:00:00+00:00"
+                        if image_years is not None and image_id in image_years
+                        else None
+                    ),
                     "image_id": image_id,
                     "relative_tiff_path": str(raster.relative_to(output_root)),
                 }
@@ -501,6 +512,113 @@ def test_discover_feature_rasters_reads_manifest_and_filters_feature_files(tmp_p
     assert [item.source_image_id for item in discovered] == ["IMAGE_A", "IMAGE_B"]
 
 
+def test_discover_feature_rasters_excludes_out_of_year_manifest_entries(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "raw"
+    feature_dir.mkdir()
+    first_raster = feature_dir / "alphaearth_2017.tif"
+    second_raster = feature_dir / "alphaearth_2018.tif"
+    _write_feature_raster(first_raster)
+    _write_feature_raster(second_raster, value_offset=10.0)
+
+    manifest_path = feature_dir / "manifests" / "run.json"
+    output_root = manifest_path.parent.parent
+    payload = {
+        "config": {"output_root": str(output_root), "start_date": "2017-01-01"},
+        "download": {
+            "output_root": str(output_root),
+            "results": [
+                {
+                    "image_id": "IMAGE_2017",
+                    "status": "downloaded",
+                    "tiff_path": str(first_raster.relative_to(output_root)),
+                },
+                {
+                    "image_id": "IMAGE_2018",
+                    "status": "downloaded",
+                    "tiff_path": str(second_raster.relative_to(output_root)),
+                },
+            ],
+        },
+        "schema_version": "0.1.1",
+        "search": {
+            "images": [
+                {
+                    "image_id": "IMAGE_2017",
+                    "acquisition_time_utc": "2017-01-01T00:00:00+00:00",
+                    "relative_tiff_path": str(first_raster.relative_to(output_root)),
+                },
+                {
+                    "image_id": "IMAGE_2018",
+                    "acquisition_time_utc": "2018-01-01T00:00:00+00:00",
+                    "relative_tiff_path": str(second_raster.relative_to(output_root)),
+                },
+            ]
+        },
+    }
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    discovered = discover_feature_rasters(
+        feature_input=feature_dir,
+        manifest_path=manifest_path,
+        requested_year=2017,
+    )
+    assert len(discovered) == 1
+    assert discovered[0].feature_id == "alphaearth_2017"
+    assert discovered[0].source_image_id == "IMAGE_2017"
+
+
+def test_discover_feature_rasters_excludes_out_of_year_manifest_images(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "raw"
+    feature_dir.mkdir()
+    first_raster = feature_dir / "alphaearth_2017.tif"
+    second_raster = feature_dir / "alphaearth_2018.tif"
+    _write_feature_raster(first_raster)
+    _write_feature_raster(second_raster, value_offset=10.0)
+
+    manifest_path = feature_dir / "manifests" / "run.json"
+    _write_manifest(
+        manifest_path,
+        [
+            ("IMAGE_2017", first_raster),
+            ("IMAGE_2018", second_raster),
+        ],
+        manifest_year=2017,
+        image_years={"IMAGE_2017": 2017, "IMAGE_2018": 2018},
+    )
+
+    discovered = discover_feature_rasters(manifest_path=manifest_path, requested_year=2017)
+
+    assert len(discovered) == 1
+    assert [item.feature_id for item in discovered] == ["alphaearth_2017"]
+    assert [item.source_image_id for item in discovered] == ["IMAGE_2017"]
+
+
+def test_discover_feature_rasters_keeps_multiple_same_year_manifest_images(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "raw"
+    feature_dir.mkdir()
+    first_raster = feature_dir / "alphaearth_a.tif"
+    second_raster = feature_dir / "alphaearth_b.tif"
+    _write_feature_raster(first_raster)
+    _write_feature_raster(second_raster, value_offset=10.0)
+
+    manifest_path = feature_dir / "manifests" / "run.json"
+    _write_manifest(
+        manifest_path,
+        [
+            ("IMAGE_A", first_raster),
+            ("IMAGE_B", second_raster),
+        ],
+        manifest_year=2017,
+        image_years={"IMAGE_A": 2017, "IMAGE_B": 2017},
+    )
+
+    discovered = discover_feature_rasters(manifest_path=manifest_path, requested_year=2017)
+
+    assert len(discovered) == 2
+    assert [item.source_image_id for item in discovered] == ["IMAGE_A", "IMAGE_B"]
+
+
 def test_run_baseline_pipeline_batches_native_feature_rasters(tmp_path: Path) -> None:
     feature_dir = tmp_path / "raw"
     feature_dir.mkdir()
@@ -571,20 +689,56 @@ def test_run_baseline_pipeline_batches_native_feature_rasters(tmp_path: Path) ->
     assert set(table["feature_id"]) == {"alphaearth_full", "alphaearth_left", "alphaearth_right"}
     assert set(table["source_image_id"]) == {"IMAGE_FULL", "IMAGE_LEFT", "IMAGE_RIGHT"}
 
+
+def test_run_baseline_pipeline_ignores_out_of_year_manifest_images(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "raw"
+    feature_dir.mkdir()
+    first_raster = feature_dir / "alphaearth_2017.tif"
+    second_raster = feature_dir / "alphaearth_2018.tif"
+    reference_geojson = tmp_path / "crome.geojson"
+    manifest_path = feature_dir / "manifests" / "run.json"
+    _write_feature_raster(first_raster)
+    _write_feature_raster(second_raster, value_offset=10.0)
+    _write_reference_geojson(reference_geojson)
+    _write_manifest(
+        manifest_path,
+        [
+            ("IMAGE_2017", first_raster),
+            ("IMAGE_2018", second_raster),
+        ],
+        aoi_bounds=(0.0, 0.0, 4.0, 4.0),
+        manifest_year=2017,
+        image_years={"IMAGE_2017": 2017, "IMAGE_2018": 2018},
+    )
+
+    result = run_baseline_pipeline(
+        feature_input=feature_dir,
+        manifest_path=manifest_path,
+        reference_path=reference_geojson,
+        year=2017,
+        output_root=tmp_path / "outputs",
+        aoi_label="east-anglia",
+        label_mode="polygon_to_pixel",
+        test_size=0.0,
+    )
+
+    assert len(result.feature_results) == 1
+    assert [feature.source_image_id for feature in result.feature_results] == ["IMAGE_2017"]
+
     payload = json.loads(result.pipeline_manifest_path.read_text(encoding="utf-8"))
-    assert payload["feature_count"] == 3
-    assert len(payload["features"]) == 3
-    assert all(item["tile_id"] in {"IMAGE_FULL", "IMAGE_LEFT", "IMAGE_RIGHT"} for item in payload["features"])
+    assert payload["feature_count"] == 1
+    assert len(payload["features"]) == 1
+    assert [item["tile_id"] for item in payload["features"]] == ["IMAGE_2017"]
     assert all(Path(item["model_path"]).exists() for item in payload["features"])
     assert all(Path(item["training_table_path"]).exists() for item in payload["features"])
     assert payload["qc_manifest_path"] == str(result.qc_manifest_path)
     assert payload["sample_cache_root"] is not None
-    assert len(payload["sample_cache_manifest_paths"]) == 3
+    assert len(payload["sample_cache_manifest_paths"]) == 1
     assert payload["skipped_feature_count"] == 0
 
     qc_payload = json.loads(result.qc_manifest_path.read_text(encoding="utf-8"))
-    assert qc_payload["feature_count"] == 3
-    assert len(qc_payload["sample_cache_manifest_paths"]) == 3
+    assert qc_payload["feature_count"] == 1
+    assert len(qc_payload["sample_cache_manifest_paths"]) == 1
     assert qc_payload["reference_path"] == str(reference_geojson)
     assert qc_payload["reference_summary"]["reference_path"] == str(reference_geojson)
     assert qc_payload["requested_aoi"]["bounds"] == [0.0, 0.0, 4.0, 4.0]

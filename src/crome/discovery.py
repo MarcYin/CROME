@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,102 @@ class DiscoveredFeatureRaster:
     feature_id: str
     raster_path: Path
     source_image_id: str | None = None
+
+
+def _parse_year(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        if 1000 <= value <= 9999:
+            return value
+        if value > 10_000_000_000:
+            return datetime.fromtimestamp(value / 1000.0, tz=timezone.utc).year
+        if value > 100_000_000:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc).year
+        return None
+    if isinstance(value, float):
+        return _parse_year(int(value))
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if len(text) == 4 and text.isdigit():
+            return int(text)
+        if text.isdigit():
+            return _parse_year(int(text))
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).year
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_requested_year(payload: dict[str, Any], requested_year: int | None) -> int | None:
+    if requested_year is not None:
+        return requested_year
+    config_payload = payload.get("config")
+    if isinstance(config_payload, dict):
+        return _parse_year(config_payload.get("start_date"))
+    search_payload = payload.get("search")
+    if isinstance(search_payload, dict):
+        return _parse_year(search_payload.get("start_date"))
+    return None
+
+
+def _sidecar_metadata_path(raster_path: Path) -> Path:
+    return raster_path.with_suffix(f"{raster_path.suffix}.metadata.json")
+
+
+def _image_year_from_metadata(node: dict[str, Any]) -> int | None:
+    for key in ("acquisition_time_utc", "local_datetime", "start_date", "year"):
+        year = _parse_year(node.get(key))
+        if year is not None:
+            return year
+
+    properties = node.get("properties")
+    if isinstance(properties, dict):
+        for key in ("system:time_start", "time_start"):
+            year = _parse_year(properties.get(key))
+            if year is not None:
+                return year
+
+    raw_image_info = node.get("raw_image_info")
+    if isinstance(raw_image_info, dict):
+        year = _image_year_from_metadata(raw_image_info)
+        if year is not None:
+            return year
+
+    return None
+
+
+def _raster_year(raster_path: Path, manifest_entry: dict[str, Any] | None = None) -> int | None:
+    if isinstance(manifest_entry, dict):
+        year = _image_year_from_metadata(manifest_entry)
+        if year is not None:
+            return year
+
+    sidecar_path = _sidecar_metadata_path(raster_path)
+    if not sidecar_path.exists():
+        return None
+    try:
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if isinstance(payload, dict):
+        return _image_year_from_metadata(payload)
+    return None
+
+
+def _matches_requested_year(
+    raster_path: Path,
+    *,
+    requested_year: int | None,
+    manifest_entry: dict[str, Any] | None = None,
+) -> bool:
+    if requested_year is None:
+        return True
+    raster_year = _raster_year(raster_path, manifest_entry=manifest_entry)
+    return raster_year is None or raster_year == requested_year
 
 
 def _iter_manifest_entries(node: Any) -> list[dict[str, Any]]:
@@ -99,12 +196,16 @@ def _discover_from_edown_manifest(
     manifest_path: Path,
     *,
     manifest_root: Path,
-) -> list[DiscoveredFeatureRaster]:
+    requested_year: int | None = None,
+) -> tuple[list[DiscoveredFeatureRaster], set[Path]]:
     discovered: dict[Path, DiscoveredFeatureRaster] = {}
+    blocked_paths: set[Path] = set()
     search_payload = payload.get("search")
     download_payload = payload.get("download")
     if not isinstance(search_payload, dict) and not isinstance(download_payload, dict):
-        return []
+        return [], blocked_paths
+
+    effective_requested_year = _extract_requested_year(payload, requested_year)
 
     search_images: dict[str, dict[str, Any]] = {}
     if isinstance(search_payload, dict):
@@ -143,6 +244,14 @@ def _discover_from_edown_manifest(
                     )
                 if resolved_path is None:
                     continue
+                search_entry = search_images.get(image_id)
+                if not _matches_requested_year(
+                    resolved_path,
+                    requested_year=effective_requested_year,
+                    manifest_entry=search_entry,
+                ):
+                    blocked_paths.add(resolved_path)
+                    continue
                 record = _build_feature_record(
                     resolved_path,
                     source_image_id=image_id,
@@ -151,7 +260,7 @@ def _discover_from_edown_manifest(
                     discovered[record.raster_path] = record
 
     if discovered:
-        return sorted(discovered.values(), key=lambda item: str(item.raster_path))
+        return sorted(discovered.values(), key=lambda item: str(item.raster_path)), blocked_paths
 
     for image_id, image in search_images.items():
         resolved_path = _resolve_manifest_path(
@@ -161,6 +270,13 @@ def _discover_from_edown_manifest(
         )
         if resolved_path is None:
             continue
+        if not _matches_requested_year(
+            resolved_path,
+            requested_year=effective_requested_year,
+            manifest_entry=image,
+        ):
+            blocked_paths.add(resolved_path)
+            continue
         record = _build_feature_record(
             resolved_path,
             source_image_id=image_id,
@@ -168,14 +284,25 @@ def _discover_from_edown_manifest(
         if record is not None:
             discovered[record.raster_path] = record
 
-    return sorted(discovered.values(), key=lambda item: str(item.raster_path))
+    return sorted(discovered.values(), key=lambda item: str(item.raster_path)), blocked_paths
 
 
-def _discover_from_manifest(manifest_path: Path) -> tuple[list[DiscoveredFeatureRaster], Path]:
+def _discover_from_manifest(
+    manifest_path: Path,
+    *,
+    requested_year: int | None = None,
+) -> tuple[list[DiscoveredFeatureRaster], Path, set[Path]]:
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest_root = _manifest_output_root(payload, manifest_path)
     discovered: dict[Path, DiscoveredFeatureRaster] = {}
-    for record in _discover_from_edown_manifest(payload, manifest_path, manifest_root=manifest_root):
+    blocked_paths: set[Path] = set()
+    manifest_records, blocked_paths = _discover_from_edown_manifest(
+        payload,
+        manifest_path,
+        manifest_root=manifest_root,
+        requested_year=requested_year,
+    )
+    for record in manifest_records:
         discovered[record.raster_path] = record
     for entry in _iter_manifest_entries(payload):
         resolved_path = None
@@ -187,7 +314,7 @@ def _discover_from_manifest(manifest_path: Path) -> tuple[list[DiscoveredFeature
             )
             if resolved_path is not None:
                 break
-        if resolved_path is None:
+        if resolved_path is None or resolved_path in blocked_paths:
             continue
 
         source_image_id = next(
@@ -205,11 +332,22 @@ def _discover_from_manifest(manifest_path: Path) -> tuple[list[DiscoveredFeature
         )
         if record is not None:
             discovered[record.raster_path] = record
-    return sorted(discovered.values(), key=lambda item: str(item.raster_path)), manifest_root
+    return sorted(discovered.values(), key=lambda item: str(item.raster_path)), manifest_root, blocked_paths
 
 
-def _discover_from_path(feature_input: Path) -> list[DiscoveredFeatureRaster]:
+def _discover_from_path(
+    feature_input: Path,
+    *,
+    requested_year: int | None = None,
+    blocked_paths: set[Path] | None = None,
+) -> list[DiscoveredFeatureRaster]:
+    blocked = blocked_paths or set()
     if feature_input.is_file():
+        if feature_input in blocked or not _matches_requested_year(
+            feature_input,
+            requested_year=requested_year,
+        ):
+            return []
         record = _build_feature_record(feature_input)
         return [record] if record is not None else []
 
@@ -219,6 +357,11 @@ def _discover_from_path(feature_input: Path) -> list[DiscoveredFeatureRaster]:
     discovered: dict[Path, DiscoveredFeatureRaster] = {}
     for pattern in ("*.tif", "*.tiff", "*.TIF", "*.TIFF"):
         for candidate in sorted(feature_input.rglob(pattern)):
+            if candidate in blocked or not _matches_requested_year(
+                candidate,
+                requested_year=requested_year,
+            ):
+                continue
             record = _build_feature_record(candidate)
             if record is not None:
                 discovered[record.raster_path] = record
@@ -229,6 +372,7 @@ def discover_feature_rasters(
     *,
     feature_input: Path | str | None = None,
     manifest_path: Path | str | None = None,
+    requested_year: int | None = None,
 ) -> tuple[DiscoveredFeatureRaster, ...]:
     """Discover native AlphaEarth feature rasters.
 
@@ -241,12 +385,16 @@ def discover_feature_rasters(
 
     discovered: dict[Path, DiscoveredFeatureRaster] = {}
     manifest_root: Path | None = None
+    blocked_paths: set[Path] = set()
 
     resolved_manifest_path = Path(manifest_path) if manifest_path is not None else None
     if resolved_manifest_path is not None:
         if not resolved_manifest_path.exists():
             raise FileNotFoundError(f"Manifest path does not exist: {resolved_manifest_path}")
-        manifest_records, manifest_root = _discover_from_manifest(resolved_manifest_path)
+        manifest_records, manifest_root, blocked_paths = _discover_from_manifest(
+            resolved_manifest_path,
+            requested_year=requested_year,
+        )
         for record in manifest_records:
             discovered[record.raster_path] = record
 
@@ -257,7 +405,11 @@ def discover_feature_rasters(
     else:
         raise ValueError("A feature input path could not be resolved.")
 
-    for record in _discover_from_path(resolved_feature_input):
+    for record in _discover_from_path(
+        resolved_feature_input,
+        requested_year=requested_year,
+        blocked_paths=blocked_paths,
+    ):
         discovered.setdefault(record.raster_path, record)
 
     if not discovered:

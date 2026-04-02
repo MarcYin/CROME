@@ -996,6 +996,7 @@ def main_prepare_subset(argv: list[str] | None = None) -> int:
     discovered = discover_feature_rasters(
         feature_input=args.feature_input,
         manifest_path=args.manifest_path,
+        requested_year=args.year,
     )
     tile_ids = _subset_tile_ids([feature.raster_path for feature in discovered])
     resolved_reference_path = materialize_crome_reference_subset(

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from crome.config import AlphaEarthDownloadRequest
+from crome.discovery import discover_feature_rasters
 from crome.paths import OUTPUT_ROOT_ENV_VAR, default_output_root
 
 
@@ -234,6 +235,27 @@ def _raise_download_failure(request: AlphaEarthDownloadRequest, summary: Any) ->
     )
 
 
+def _filter_source_image_ids_for_requested_year(
+    manifest_path: Path | None,
+    *,
+    requested_year: int,
+    source_image_ids: tuple[str, ...],
+) -> tuple[str, ...]:
+    if manifest_path is None or not manifest_path.exists() or not source_image_ids:
+        return source_image_ids
+
+    try:
+        discovered = discover_feature_rasters(manifest_path=manifest_path, requested_year=requested_year)
+    except ValueError:
+        return ()
+    allowed_image_ids = {
+        record.source_image_id for record in discovered if isinstance(record.source_image_id, str)
+    }
+    if not allowed_image_ids:
+        return ()
+    return tuple(image_id for image_id in source_image_ids if image_id in allowed_image_ids)
+
+
 def download_alphaearth_images(
     request: AlphaEarthDownloadRequest,
     edown_module: Any | None = None,
@@ -255,6 +277,16 @@ def download_alphaearth_images(
 
     manifest_value = getattr(summary, "manifest_path", None)
     manifest_path = Path(manifest_value) if manifest_value is not None else None
+    source_image_ids = _filter_source_image_ids_for_requested_year(
+        manifest_path,
+        requested_year=request.year,
+        source_image_ids=_extract_image_ids(summary),
+    )
+    if not source_image_ids:
+        raise DownloadFailedError(
+            "AlphaEarth download resolved imagery, but none of the discovered images matched "
+            f"requested year {request.year}."
+        )
 
     return AlphaEarthDownloadResult(
         aoi_label=request.aoi_label or "aoi",
@@ -263,7 +295,7 @@ def download_alphaearth_images(
         conditional_year=request.conditional_year,
         manifest_path=manifest_path,
         output_root=request.dataset_output_root,
-        source_image_ids=_extract_image_ids(summary),
+        source_image_ids=source_image_ids,
         year=request.year,
     )
 

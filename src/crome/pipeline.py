@@ -351,7 +351,11 @@ def run_baseline_pipeline(
     if feature_input is None and manifest_path is None:
         raise ValueError("Provide at least one of feature_input or manifest_path.")
 
-    discovered = discover_feature_rasters(feature_input=feature_input, manifest_path=manifest_path)
+    discovered = discover_feature_rasters(
+        feature_input=feature_input,
+        manifest_path=manifest_path,
+        requested_year=year,
+    )
     spec = _build_training_spec(
         feature_input=feature_input,
         manifest_path=manifest_path,
