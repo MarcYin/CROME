@@ -83,19 +83,27 @@ def _build_aoi(request: AlphaEarthDownloadRequest, edown_module: Any) -> Any:
 def build_download_config(
     request: AlphaEarthDownloadRequest,
     edown_module: Any | None = None,
+    *,
+    download_workers: int | None = None,
+    prepare_workers: int | None = None,
 ) -> Any:
     """Build an edown DownloadConfig for one AlphaEarth request."""
 
     module = edown_module or _load_edown()
     aoi = _build_aoi(request, module)
-    return module.DownloadConfig(
-        collection_id=request.collection_id,
-        start_date=request.start_date,
-        end_date=request.end_date,
-        aoi=aoi,
-        bands=request.bands,
-        output_root=request.dataset_output_root,
-    )
+    kwargs: dict[str, Any] = {
+        "collection_id": request.collection_id,
+        "start_date": request.start_date,
+        "end_date": request.end_date,
+        "aoi": aoi,
+        "bands": request.bands,
+        "output_root": request.dataset_output_root,
+    }
+    if download_workers is not None:
+        kwargs["download_workers"] = download_workers
+    if prepare_workers is not None:
+        kwargs["prepare_workers"] = prepare_workers
+    return module.DownloadConfig(**kwargs)
 
 
 def _extract_image_count(summary: Any) -> int | None:
@@ -259,11 +267,18 @@ def _filter_source_image_ids_for_requested_year(
 def download_alphaearth_images(
     request: AlphaEarthDownloadRequest,
     edown_module: Any | None = None,
+    *,
+    download_workers: int | None = None,
+    prepare_workers: int | None = None,
 ) -> AlphaEarthDownloadResult:
     """Run one AlphaEarth download through edown."""
 
     module = edown_module or _load_edown()
-    config = build_download_config(request, module)
+    config = build_download_config(
+        request, module,
+        download_workers=download_workers,
+        prepare_workers=prepare_workers,
+    )
     summary = module.download_images(config)
 
     image_count = _extract_image_count(summary)
