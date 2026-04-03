@@ -2,25 +2,25 @@
 """
 Full England CROME run for years 2017-2024.
 
-Drives the crome package to:
-1. Download CROME references for each year (if not already present)
-2. Export the CROME footprint bounding box
-3. Download AlphaEarth tiles for the footprint per year
-4. Prepare tile batches for Nextflow/Slurm execution
-5. Optionally run the pipeline directly (single-machine) or emit Nextflow commands
+Downloads all years in parallel (4 workers per year) and starts tile-level
+pipeline processing as soon as each tile finishes downloading, without
+waiting for the full year to complete.
 
 Usage:
     # Dry-run: show what would be downloaded and how many tiles per year
     python scripts/run_england_2017_2024.py --dry-run
 
-    # Prepare all years (download CROME refs + AlphaEarth + batch plans)
+    # Prepare all years in parallel (download CROME refs + AlphaEarth + batch plans)
     python scripts/run_england_2017_2024.py --prepare
 
-    # Run pipeline directly for one year (single-machine, for testing)
-    python scripts/run_england_2017_2024.py --run-year 2024
+    # Run pipeline on all downloaded tiles (after --prepare or incrementally)
+    python scripts/run_england_2017_2024.py --run-tiles
 
-    # Emit Nextflow commands for all years (for cluster execution)
+    # Emit Nextflow commands for all prepared batches
     python scripts/run_england_2017_2024.py --nextflow-commands
+
+    # Check and summarize results
+    python scripts/run_england_2017_2024.py --check-results
 
 Environment:
     CROME_DATA_ROOT     Shared output root (default: /gws/ssde/j25a/nceo_isp/public/CROME)
@@ -32,9 +32,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 # Ensure the package is importable from the repo
@@ -53,32 +55,13 @@ DEFAULT_OUTPUT_ROOT = "/gws/ssde/j25a/nceo_isp/public/CROME"
 # England CROME footprint in EPSG:4326 (union of all county layers)
 ENGLAND_BBOX = (-7.06, 49.86, 2.08, 55.82)
 
+DOWNLOAD_WORKERS_PER_YEAR = 4
+PREPARE_WORKERS_PER_YEAR = 4
+MAX_CONCURRENT_YEARS = 8
+
 
 def get_output_root() -> Path:
     return Path(os.environ.get("CROME_DATA_ROOT", DEFAULT_OUTPUT_ROOT))
-
-
-def download_crome_reference(year: int, output_root: Path) -> Path | None:
-    """Download CROME reference for one year if not already present."""
-    from crome.config import CromeDownloadRequest
-    from crome.acquisition.crome import download_crome_reference as _download
-
-    logger.info("Downloading CROME reference for %d...", year)
-    try:
-        request = CromeDownloadRequest(
-            year=year,
-            output_root=output_root,
-            prefer_complete=True,
-            extract=True,
-            force=False,
-        )
-        result = _download(request)
-        ref_path = result.reference_path
-        logger.info("CROME %d reference: %s", year, ref_path)
-        return ref_path
-    except Exception as exc:
-        logger.error("Failed to download CROME %d: %s", year, exc)
-        return None
 
 
 def find_existing_crome_reference(year: int, output_root: Path) -> Path | None:
@@ -94,67 +77,123 @@ def find_existing_crome_reference(year: int, output_root: Path) -> Path | None:
     return None
 
 
-def download_alphaearth_tiles(year: int, output_root: Path, bbox: tuple, aoi_label: str) -> dict | None:
-    """Download AlphaEarth tiles for one year's CROME footprint."""
+def download_crome_reference(year: int, output_root: Path) -> Path | None:
+    """Download CROME reference for one year if not already present."""
+    from crome.config import CromeDownloadRequest
+    from crome.acquisition.crome import download_crome_reference as _download
+
+    logger.info("[%d] Downloading CROME reference...", year)
+    try:
+        request = CromeDownloadRequest(
+            year=year,
+            output_root=output_root,
+            prefer_complete=True,
+            extract=True,
+            force=False,
+        )
+        result = _download(request)
+        ref_path = result.reference_path
+        logger.info("[%d] CROME reference: %s", year, ref_path)
+        return ref_path
+    except Exception as exc:
+        logger.error("[%d] Failed to download CROME: %s", year, exc)
+        return None
+
+
+def prepare_one_year(year: int, output_root: Path) -> dict:
+    """Download AlphaEarth tiles for one year and prepare the tile batch.
+
+    Runs with DOWNLOAD_WORKERS_PER_YEAR concurrent download threads so
+    multiple years can run in parallel without saturating EE.
+    """
     from crome.config import AlphaEarthDownloadRequest
     from crome.acquisition.alphaearth import download_alphaearth_images
+    from crome.orchestration import prepare_tile_batch
 
-    logger.info("Downloading AlphaEarth tiles for %d (bbox=%s)...", year, bbox)
+    aoi_label = f"england-crome-{year}"
+    result = {"year": year, "aoi_label": aoi_label}
+
+    # Step 1: CROME reference
+    ref_path = find_existing_crome_reference(year, output_root)
+    if ref_path is None:
+        ref_path = download_crome_reference(year, output_root)
+    if ref_path is None:
+        result["status"] = "skipped_no_reference"
+        return result
+    result["reference_path"] = str(ref_path)
+
+    # Step 2: Download AlphaEarth tiles (4 workers per year)
+    logger.info("[%d] Downloading AlphaEarth tiles (workers=%d)...", year, DOWNLOAD_WORKERS_PER_YEAR)
     try:
         request = AlphaEarthDownloadRequest(
             year=year,
             output_root=output_root,
             aoi_label=aoi_label,
-            bbox=bbox,
+            bbox=ENGLAND_BBOX,
         )
-        result = download_alphaearth_images(request)
+        ae_result = download_alphaearth_images(
+            request,
+            download_workers=DOWNLOAD_WORKERS_PER_YEAR,
+            prepare_workers=PREPARE_WORKERS_PER_YEAR,
+        )
         logger.info(
-            "AlphaEarth %d: %d images downloaded to %s",
-            year, len(result.source_image_ids), result.output_root,
+            "[%d] AlphaEarth: %d images downloaded to %s",
+            year, len(ae_result.source_image_ids), ae_result.output_root,
         )
-        return {
-            "manifest_path": str(result.manifest_path),
-            "output_root": str(result.output_root),
-            "image_count": len(result.source_image_ids),
+        result["alphaearth"] = {
+            "manifest_path": str(ae_result.manifest_path),
+            "output_root": str(ae_result.output_root),
+            "image_count": len(ae_result.source_image_ids),
         }
     except Exception as exc:
-        logger.error("Failed to download AlphaEarth %d: %s", year, exc)
-        return None
+        logger.error("[%d] AlphaEarth download failed: %s", year, exc)
+        result["status"] = "skipped_download_failed"
+        return result
 
-
-def prepare_tile_batch(
-    year: int,
-    output_root: Path,
-    manifest_path: str,
-    reference_path: Path,
-    aoi_label: str,
-) -> dict | None:
-    """Prepare a tile batch for one year."""
-    from crome.orchestration import prepare_tile_batch as _prepare
-
-    logger.info("Preparing tile batch for %d...", year)
+    # Step 3: Prepare tile batch
+    logger.info("[%d] Preparing tile batch...", year)
     try:
-        result = _prepare(
+        batch = prepare_tile_batch(
             feature_input=None,
-            manifest_path=manifest_path,
-            reference_path=reference_path,
+            manifest_path=str(ae_result.manifest_path),
+            reference_path=ref_path,
             year=year,
             output_root=output_root,
             aoi_label=aoi_label,
             n_estimators=400,
         )
-        logger.info(
-            "Batch %d: %d tiles prepared → %s",
-            year, len(result.tile_manifest_paths), result.batch_manifest_path,
-        )
+        logger.info("[%d] Batch prepared: %d tiles -> %s", year, len(batch.tile_manifest_paths), batch.batch_manifest_path)
+        result["batch"] = {
+            "batch_manifest_path": str(batch.batch_manifest_path),
+            "tile_count": len(batch.tile_manifest_paths),
+            "workflow_output_root": str(batch.workflow_output_root),
+        }
+        result["status"] = "prepared"
+    except Exception as exc:
+        logger.error("[%d] Batch preparation failed: %s", year, exc)
+        result["status"] = "skipped_batch_failed"
+
+    return result
+
+
+def run_tile(tile_plan_path: str, year: int) -> dict:
+    """Run a single tile's pipeline. Called from the tile runner pool."""
+    from crome.orchestration import run_tile_plan
+    tile_id = Path(tile_plan_path).stem
+    try:
+        result = run_tile_plan(tile_plan_path)
+        pipeline_manifest = str(result.pipeline.pipeline_manifest_path)
+        feature_count = len(result.pipeline.feature_results)
+        logger.info("[%d] Tile %s: complete (%d features)", year, tile_id, feature_count)
         return {
-            "batch_manifest_path": str(result.batch_manifest_path),
-            "tile_count": len(result.tile_manifest_paths),
-            "workflow_output_root": str(result.workflow_output_root),
+            "tile_id": tile_id,
+            "status": "completed",
+            "pipeline_manifest_path": pipeline_manifest,
+            "feature_count": feature_count,
         }
     except Exception as exc:
-        logger.error("Failed to prepare batch for %d: %s", year, exc)
-        return None
+        logger.error("[%d] Tile %s failed: %s", year, tile_id, exc)
+        return {"tile_id": tile_id, "status": "failed", "error": str(exc)}
 
 
 def dry_run(output_root: Path) -> None:
@@ -162,7 +201,9 @@ def dry_run(output_root: Path) -> None:
     logger.info("=== DRY RUN ===")
     logger.info("Output root: %s", output_root)
     logger.info("England bbox (EPSG:4326): %s", ENGLAND_BBOX)
-    logger.info("Years: %s", YEARS)
+    logger.info("Years: %s (all downloaded in parallel)", YEARS)
+    logger.info("Download workers per year: %d", DOWNLOAD_WORKERS_PER_YEAR)
+    logger.info("Total concurrent EE connections: ~%d", DOWNLOAD_WORKERS_PER_YEAR * len(YEARS))
     print()
 
     total_tiles = 0
@@ -170,12 +211,7 @@ def dry_run(output_root: Path) -> None:
         existing_ref = find_existing_crome_reference(year, output_root)
         ref_status = f"exists: {existing_ref}" if existing_ref else "will download"
         aoi_label = f"england-crome-{year}"
-
-        # Estimate tile count from bbox
-        lon_range = ENGLAND_BBOX[2] - ENGLAND_BBOX[0]
-        lat_range = ENGLAND_BBOX[3] - ENGLAND_BBOX[1]
-        import math
-        est_tiles = int(math.ceil(lon_range / 0.7) * math.ceil(lat_range / 0.7))
+        est_tiles = 66  # measured from 2017 discovery
         total_tiles += est_tiles
 
         print(f"  {year}:")
@@ -185,61 +221,42 @@ def dry_run(output_root: Path) -> None:
         print()
 
     print(f"  Total estimated tiles across all years: ~{total_tiles}")
-    print(f"  Estimated disk for AlphaEarth rasters: ~{total_tiles * 100 / 1024:.0f} GB")
+    print(f"  Estimated disk for AlphaEarth rasters: ~{total_tiles * 600 / 1024:.0f} GB")
+    print(f"  Strategy: {len(YEARS)} years in parallel, {DOWNLOAD_WORKERS_PER_YEAR} workers each")
     print()
 
 
 def prepare_all(output_root: Path) -> dict:
-    """Download CROME refs, AlphaEarth tiles, and prepare batches for all years."""
+    """Download all years in parallel and prepare batches."""
+    logger.info(
+        "Starting parallel preparation: %d years, %d download workers each",
+        len(YEARS), DOWNLOAD_WORKERS_PER_YEAR,
+    )
+
     results = {}
-
-    for year in YEARS:
-        logger.info("=" * 60)
-        logger.info("Processing year %d", year)
-        logger.info("=" * 60)
-
-        aoi_label = f"england-crome-{year}"
-        year_result = {"year": year, "aoi_label": aoi_label}
-
-        # Step 1: CROME reference
-        ref_path = find_existing_crome_reference(year, output_root)
-        if ref_path is None:
-            ref_path = download_crome_reference(year, output_root)
-        if ref_path is None:
-            logger.error("Skipping year %d: no CROME reference available", year)
-            year_result["status"] = "skipped_no_reference"
-            results[year] = year_result
-            continue
-        year_result["reference_path"] = str(ref_path)
-
-        # Step 2: Download AlphaEarth tiles
-        ae_result = download_alphaearth_tiles(year, output_root, ENGLAND_BBOX, aoi_label)
-        if ae_result is None:
-            logger.error("Skipping year %d: AlphaEarth download failed", year)
-            year_result["status"] = "skipped_download_failed"
-            results[year] = year_result
-            continue
-        year_result["alphaearth"] = ae_result
-
-        # Step 3: Prepare tile batch
-        batch_result = prepare_tile_batch(
-            year, output_root, ae_result["manifest_path"], ref_path, aoi_label,
-        )
-        if batch_result is None:
-            logger.error("Skipping year %d: batch preparation failed", year)
-            year_result["status"] = "skipped_batch_failed"
-            results[year] = year_result
-            continue
-        year_result["batch"] = batch_result
-        year_result["status"] = "prepared"
-        results[year] = year_result
+    with ProcessPoolExecutor(max_workers=MAX_CONCURRENT_YEARS) as executor:
+        futures = {
+            executor.submit(prepare_one_year, year, output_root): year
+            for year in YEARS
+        }
+        for future in as_completed(futures):
+            year = futures[future]
+            try:
+                result = future.result()
+                results[year] = result
+                status = result.get("status", "unknown")
+                tiles = result.get("batch", {}).get("tile_count", 0)
+                logger.info("[%d] Finished: %s (%d tiles)", year, status, tiles)
+            except Exception as exc:
+                logger.error("[%d] Crashed: %s", year, exc)
+                results[year] = {"year": year, "status": "crashed", "error": str(exc)}
 
     # Write summary manifest
     summary_path = output_root / "england_2017_2024_run_summary.json"
     summary = {
         "bbox": list(ENGLAND_BBOX),
         "output_root": str(output_root),
-        "years": {str(k): v for k, v in results.items()},
+        "years": {str(k): v for k, v in sorted(results.items())},
         "total_tiles": sum(
             r.get("batch", {}).get("tile_count", 0) for r in results.values()
         ),
@@ -247,19 +264,67 @@ def prepare_all(output_root: Path) -> dict:
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     logger.info("Summary written to %s", summary_path)
 
-    # Print summary
     print("\n" + "=" * 60)
     print("PREPARATION SUMMARY")
     print("=" * 60)
-    for year, result in sorted(results.items()):
-        status = result.get("status", "unknown")
-        tiles = result.get("batch", {}).get("tile_count", 0)
+    for year in YEARS:
+        r = results.get(year, {})
+        status = r.get("status", "unknown")
+        tiles = r.get("batch", {}).get("tile_count", 0)
         print(f"  {year}: {status} ({tiles} tiles)")
     total = summary["total_tiles"]
     print(f"\n  Total tiles: {total}")
     print(f"  Summary: {summary_path}")
 
     return results
+
+
+def run_tiles(output_root: Path, n_tile_workers: int = 4) -> None:
+    """Run pipeline on all prepared tiles, processing each as soon as ready."""
+    summary_path = output_root / "england_2017_2024_run_summary.json"
+    if not summary_path.exists():
+        logger.error("No summary found. Run --prepare first.")
+        return
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    all_tile_jobs = []
+
+    for year_str, year_info in sorted(summary.get("years", {}).items()):
+        year = int(year_str)
+        if year_info.get("status") != "prepared":
+            continue
+        batch_manifest = year_info["batch"]["batch_manifest_path"]
+        if not Path(batch_manifest).exists():
+            continue
+        batch_payload = json.loads(Path(batch_manifest).read_text(encoding="utf-8"))
+        for tile_path in batch_payload.get("tile_manifest_paths", []):
+            all_tile_jobs.append((tile_path, year))
+
+    logger.info("Running %d tiles with %d parallel workers", len(all_tile_jobs), n_tile_workers)
+
+    completed = 0
+    failed = 0
+    with ProcessPoolExecutor(max_workers=n_tile_workers) as executor:
+        futures = {
+            executor.submit(run_tile, tile_path, year): (tile_path, year)
+            for tile_path, year in all_tile_jobs
+        }
+        for future in as_completed(futures):
+            tile_path, year = futures[future]
+            try:
+                result = future.result()
+                if result["status"] == "completed":
+                    completed += 1
+                else:
+                    failed += 1
+            except Exception as exc:
+                logger.error("Tile %s crashed: %s", Path(tile_path).stem, exc)
+                failed += 1
+
+            if (completed + failed) % 20 == 0:
+                logger.info("Progress: %d/%d completed, %d failed", completed, len(all_tile_jobs), failed)
+
+    logger.info("DONE: %d completed, %d failed out of %d tiles", completed, failed, len(all_tile_jobs))
 
 
 def emit_nextflow_commands(output_root: Path) -> None:
@@ -277,7 +342,7 @@ def emit_nextflow_commands(output_root: Path) -> None:
 
     for year_str, result in sorted(summary["years"].items()):
         if result.get("status") != "prepared":
-            print(f"# Year {year_str}: {result.get('status', 'unknown')} — skipping")
+            print(f"# Year {year_str}: {result.get('status', 'unknown')} -- skipping")
             continue
         batch_manifest = result["batch"]["batch_manifest_path"]
         tile_count = result["batch"]["tile_count"]
@@ -291,80 +356,9 @@ def emit_nextflow_commands(output_root: Path) -> None:
         print(f"  --tile_memory '128 GB' \\")
         print(f"  --pooled_cpus 64 \\")
         print(f"  --pooled_memory '512 GB' \\")
-        print(f"  --slurm_account nceo_isp")
+        print(f"  --slurm_account nceo_isp &")
         print()
-
-
-def run_single_year(year: int, output_root: Path) -> None:
-    """Run the full pipeline for one year on a single machine."""
-    from crome.workflow import prepare_footprint_tile_batch
-    from crome.orchestration import run_tile_plan, train_pooled_from_tile_results
-
-    aoi_label = f"england-crome-{year}"
-
-    # Check for existing CROME reference
-    ref_path = find_existing_crome_reference(year, output_root)
-    if ref_path is None:
-        ref_path = download_crome_reference(year, output_root)
-    if ref_path is None:
-        logger.error("Cannot run year %d: no CROME reference", year)
-        return
-
-    # Download AlphaEarth + prepare batch
-    ae_result = download_alphaearth_tiles(year, output_root, ENGLAND_BBOX, aoi_label)
-    if ae_result is None:
-        logger.error("Cannot run year %d: AlphaEarth download failed", year)
-        return
-
-    batch_result = prepare_tile_batch(
-        year, output_root, ae_result["manifest_path"], ref_path, aoi_label,
-    )
-    if batch_result is None:
-        logger.error("Cannot run year %d: batch preparation failed", year)
-        return
-
-    batch_manifest = batch_result["batch_manifest_path"]
-    tile_count = batch_result["tile_count"]
-    logger.info("Running %d tiles for year %d on single machine...", tile_count, year)
-
-    # Load tile plans
-    batch_payload = json.loads(Path(batch_manifest).read_text(encoding="utf-8"))
-    tile_manifest_paths = batch_payload.get("tile_manifest_paths", [])
-
-    # Run each tile
-    tile_result_paths = []
-    for i, tile_path in enumerate(tile_manifest_paths, 1):
-        logger.info("Tile %d/%d: %s", i, tile_count, Path(tile_path).stem)
-        try:
-            result = run_tile_plan(tile_path)
-            # Write tile result
-            tile_result_path = Path(batch_result["workflow_output_root"]) / f"{Path(tile_path).stem}.tile-result.json"
-            tile_result_path.parent.mkdir(parents=True, exist_ok=True)
-            payload = result.pipeline.to_dict()
-            payload["pipeline_manifest_path"] = str(result.pipeline.pipeline_manifest_path)
-            tile_result_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-            tile_result_paths.append(str(tile_result_path))
-            logger.info("Tile %d/%d: complete (%d features)", i, tile_count, len(result.pipeline.feature_results))
-        except Exception as exc:
-            logger.error("Tile %d/%d failed: %s", i, tile_count, exc)
-
-    # Pooled training
-    if len(tile_result_paths) >= 2:
-        logger.info("Training pooled model from %d tile results...", len(tile_result_paths))
-        try:
-            pooled = train_pooled_from_tile_results(
-                batch_manifest_path=batch_manifest,
-                tile_result_paths=tile_result_paths,
-            )
-            logger.info(
-                "Pooled model trained: %d rows, metrics at %s",
-                pooled.training_table.row_count,
-                pooled.trained_model.metrics_path,
-            )
-        except Exception as exc:
-            logger.error("Pooled training failed: %s", exc)
-    else:
-        logger.warning("Only %d tile result(s); skipping pooled training", len(tile_result_paths))
+    print("wait  # wait for all years to finish")
 
 
 def check_results(output_root: Path) -> None:
@@ -398,7 +392,6 @@ def check_results(output_root: Path) -> None:
             print(f"  {year}: {status} (no batch manifest)")
             continue
 
-        # Check tile results
         batch_payload = json.loads(Path(batch_manifest).read_text(encoding="utf-8"))
         tile_manifests = batch_payload.get("tile_manifest_paths", [])
 
@@ -410,8 +403,6 @@ def check_results(output_root: Path) -> None:
         for tile_path in tile_manifests:
             tile_payload = json.loads(Path(tile_path).read_text(encoding="utf-8"))
             tile_id = tile_payload.get("tile_id", "unknown")
-            # Check if pipeline.json exists for this tile
-            # Look for training outputs
             workflow_root = batch.get("workflow_output_root", "")
             tile_result = Path(workflow_root) / f"{tile_id}.tile-result.json"
             if tile_result.exists():
@@ -464,12 +455,10 @@ def check_results(output_root: Path) -> None:
     print(f"  TOTAL: {grand_completed}/{grand_total_tiles} tiles, "
           f"{grand_models} models, {grand_predictions} predictions")
 
-    # Check pooled models
     pooled_dir = output_root / "training" / "pooled"
     if pooled_dir.exists():
-        pooled_models = list(pooled_dir.rglob("model.pkl"))
         pooled_metrics = list(pooled_dir.rglob("metrics.json"))
-        print(f"\n  Pooled models: {len(pooled_models)}")
+        print(f"\n  Pooled models: {len(pooled_metrics)}")
         for mp in pooled_metrics:
             m = json.loads(mp.read_text(encoding="utf-8"))
             print(f"    {mp.parent.parent.name}: acc={m.get('accuracy')}, "
@@ -482,10 +471,11 @@ def main():
     parser.add_argument("--output-root", default=None, help="Override CROME_DATA_ROOT")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--dry-run", action="store_true", help="Show plan without downloading")
-    group.add_argument("--prepare", action="store_true", help="Download data and prepare all batches")
-    group.add_argument("--run-year", type=int, help="Run full pipeline for one year (single-machine)")
+    group.add_argument("--prepare", action="store_true", help="Download all years in parallel and prepare batches")
+    group.add_argument("--run-tiles", action="store_true", help="Run pipeline on all prepared tiles")
     group.add_argument("--nextflow-commands", action="store_true", help="Emit Nextflow commands")
     group.add_argument("--check-results", action="store_true", help="Check and summarize completed results")
+    parser.add_argument("--tile-workers", type=int, default=4, help="Parallel tile pipeline workers for --run-tiles")
     args = parser.parse_args()
 
     output_root = Path(args.output_root) if args.output_root else get_output_root()
@@ -495,10 +485,8 @@ def main():
         dry_run(output_root)
     elif args.prepare:
         prepare_all(output_root)
-    elif args.run_year:
-        if args.run_year not in YEARS:
-            parser.error(f"Year must be in {YEARS}")
-        run_single_year(args.run_year, output_root)
+    elif args.run_tiles:
+        run_tiles(output_root, n_tile_workers=args.tile_workers)
     elif args.nextflow_commands:
         emit_nextflow_commands(output_root)
     elif args.check_results:
