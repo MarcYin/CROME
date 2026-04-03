@@ -509,21 +509,16 @@ def test_materialize_crome_reference_subset_writes_and_reuses_subset(tmp_path: P
         year=2017,
     )
 
-    assert subset_path == (
-        tmp_path
-        / "raw"
-        / "crome"
-        / "CROME_2017_complete"
-        / "subsets"
-        / "Crop_Map_of_England_2017_tile_alphaearth.fgb"
-    )
     assert subset_path.exists()
-    assert pyogrio.read_info(subset_path)["features"] == 2
+    # Multi-layer GeoPackage: all layers are combined so all 3 features
+    # (2 national + 1 county) appear in the subset
+    assert pyogrio.read_info(subset_path)["features"] == 3
 
     manifest_path = subset_path.with_suffix(".json")
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert payload["source_path"] == str(source_gpkg)
-    assert payload["source_layer"] == "Crop_Map_of_England_2017"
+    # Multi-layer sources pass source_layer=None to combine all layers
+    assert payload["source_layer"] is None
     assert payload["source_signature"]["path"] == str(source_gpkg.resolve())
     assert payload["subset_label"] == "cambridge-fringe"
     assert payload["tile_ids"] == ["alphaearth"]
@@ -580,6 +575,7 @@ def test_materialize_crome_reference_subset_uses_tile_set_id_for_multi_tile_batc
     )
 
     payload = json.loads(subset_path.with_suffix(".json").read_text(encoding="utf-8"))
-    assert subset_path.name.startswith("Crop_Map_of_England_2017_tiles_2_")
+    # Multi-layer GeoPackage: source_layer is None, so filename uses source stem
+    assert subset_path.name.startswith("source_tiles_2_")
     assert payload["tile_ids"] == ["tile_a", "tile_b"]
     assert payload["tile_set_id"].startswith("tiles_2_")

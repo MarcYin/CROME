@@ -428,7 +428,9 @@ def materialize_crome_subset(
     subset_root.mkdir(parents=True, exist_ok=True)
 
     if source_layer is None and source_path.suffix.casefold() == ".gpkg":
-        source_layer = _canonical_reference_layer(source_path, year)
+        layers = pyogrio.list_layers(source_path)
+        if len(layers) == 1:
+            source_layer = _canonical_reference_layer(source_path, year)
 
     info = pyogrio.read_info(source_path, layer=source_layer)
     source_crs = info.get("crs")
@@ -504,8 +506,18 @@ def materialize_crome_subset(
         manifest_path.unlink()
 
     minx, miny, maxx, maxy = (float(value) for value in source_bounds)
+
+    # Determine which layers to read. For multi-layer GeoPackages (e.g. 2024
+    # with 47 county layers) we must combine all layers into one FlatGeobuf
+    # so labels sparsely cover every AlphaEarth tile.
+    all_layers = [str(item[0]) for item in pyogrio.list_layers(source_path)]
+    layers_to_read = (
+        [source_layer] if (source_layer is not None and len(all_layers) == 1)
+        else all_layers
+    )
+
     ogr2ogr = shutil.which("ogr2ogr")
-    if ogr2ogr is not None:
+    if ogr2ogr is not None and len(layers_to_read) == 1:
         command = [
             ogr2ogr,
             "-f",
@@ -513,8 +525,8 @@ def materialize_crome_subset(
             str(temp_subset_path),
             str(source_path),
         ]
-        if source_layer is not None:
-            command.append(source_layer)
+        if layers_to_read[0] is not None:
+            command.append(layers_to_read[0])
         command.extend(["-spat", str(minx), str(miny), str(maxx), str(maxy)])
         completed = subprocess.run(
             command,
@@ -528,14 +540,28 @@ def materialize_crome_subset(
                 + completed.stderr.strip()
             )
     else:
-        frame = pyogrio.read_dataframe(
-            source_path,
-            layer=source_layer,
-            bbox=(minx, miny, maxx, maxy),
-        )
-        if frame.empty:
+        import pandas as pd
+        frames = []
+        for layer_name in layers_to_read:
+            layer_info = pyogrio.read_info(source_path, layer=layer_name)
+            layer_bounds = layer_info.get("total_bounds")
+            if (
+                hasattr(layer_bounds, "__len__") and len(layer_bounds) == 4
+                and (layer_bounds[2] < minx or layer_bounds[0] > maxx
+                     or layer_bounds[3] < miny or layer_bounds[1] > maxy)
+            ):
+                continue
+            frame = pyogrio.read_dataframe(
+                source_path,
+                layer=layer_name,
+                bbox=(minx, miny, maxx, maxy),
+            )
+            if not frame.empty:
+                frames.append(frame)
+        if not frames:
             raise CromeDownloadError("No CROME reference features intersected the requested subset bounds.")
-        pyogrio.write_dataframe(frame, temp_subset_path, driver="FlatGeobuf")
+        combined = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), crs=frames[0].crs)
+        pyogrio.write_dataframe(combined, temp_subset_path, driver="FlatGeobuf")
 
     if not _is_valid_subset(temp_subset_path):
         raise CromeDownloadError("No CROME reference features intersected the requested subset bounds.")
@@ -942,13 +968,18 @@ def _preferred_subset_source(reference_path: Path, *, year: int) -> tuple[Path, 
     if parent_name == "subsets":
         return reference_path, None
     if parent_name == "extracted" and reference_path.suffix.casefold() == ".gpkg":
-        return reference_path, _canonical_reference_layer(reference_path, year)
+        # For multi-layer GeoPackages, pass None so all layers get combined
+        layers = pyogrio.list_layers(reference_path)
+        layer = _canonical_reference_layer(reference_path, year) if len(layers) == 1 else None
+        return reference_path, layer
     if parent_name == "normalized":
         extracted_dir = reference_path.parent.parent / "extracted"
         extracted_candidates = sorted(extracted_dir.glob("*.gpkg"))
         if extracted_candidates:
             extracted_path = extracted_candidates[0]
-            return extracted_path, _canonical_reference_layer(extracted_path, year)
+            layers = pyogrio.list_layers(extracted_path)
+            layer = _canonical_reference_layer(extracted_path, year) if len(layers) == 1 else None
+            return extracted_path, layer
     return None
 
 
