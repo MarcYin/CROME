@@ -19,16 +19,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dev dependencies
-        run: |
-          python -m pip install pyproj
-          python -m pip install -e .[dev]
-        env:
-          PROJ_DATA: ""
-      - name: Set PROJ_DATA from pyproj
-        run: |
-          PROJ_DIR=$(python -c "import pyproj; print(pyproj.datadir.get_data_dir())")
-          echo "PROJ_DATA=$PROJ_DIR" >> "$GITHUB_ENV"
-          echo "PROJ_LIB=$PROJ_DIR" >> "$GITHUB_ENV"
+        run: python -m pip install -e .[dev]
       - name: Ruff
         run: ruff check src tests get_satellite_embeddings.py
       - name: Pytest
@@ -48,16 +39,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dev dependencies
-        run: |
-          python -m pip install pyproj
-          python -m pip install -e .[dev]
-        env:
-          PROJ_DATA: ""
-      - name: Set PROJ_DATA from pyproj
-        run: |
-          PROJ_DIR=$(python -c "import pyproj; print(pyproj.datadir.get_data_dir())")
-          echo "PROJ_DATA=$PROJ_DIR" >> "$GITHUB_ENV"
-          echo "PROJ_LIB=$PROJ_DIR" >> "$GITHUB_ENV"
+        run: python -m pip install -e .[dev]
       - name: Install Nextflow
         run: |
           cd /tmp
