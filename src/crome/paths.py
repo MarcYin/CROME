@@ -113,6 +113,16 @@ def crome_normalized_root(
     return crome_download_root(base_output_root, year, variant_label) / "normalized"
 
 
+def crome_footprint_root(
+    base_output_root: Path | str,
+    year: int,
+    variant_label: str | None = None,
+) -> Path:
+    """Return the derived-footprint directory for one CROME reference year."""
+
+    return crome_download_root(base_output_root, year, variant_label) / "footprints"
+
+
 def cache_root(base_output_root: Path | str) -> Path:
     """Return the shared cache root for reusable pipeline artifacts."""
 

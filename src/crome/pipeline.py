@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from .acquisition.crome import materialize_crome_reference_subset
+from .cli_args import add_pipeline_behavior_args, add_reference_args, add_training_args
 from .config import AlphaEarthDownloadRequest, AlphaEarthTrainingSpec, CromeReferenceConfig
 from .discovery import discover_feature_rasters
 from .features import read_feature_raster_spec
@@ -18,6 +20,7 @@ from .labeling import (
     rasterize_crome_reference,
     reference_source_bbox_for_feature_rasters,
 )
+from .manifest import find_reference_manifest
 from .paths import (
     OUTPUT_ROOT_ENV_VAR,
     default_output_root,
@@ -37,6 +40,8 @@ from .qc import (
     write_qc_overlay_png,
 )
 from .training import TrainingRasterPair, build_training_table_from_pairs, train_random_forest
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +66,40 @@ class PipelineFeatureResult:
     training_output_root: Path
     training_table_path: Path
 
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-safe representation of this feature result."""
+        return {
+            "feature_id": self.feature_id,
+            "feature_raster_path": str(self.feature_raster_path),
+            "label_mapping_path": str(self.label_mapping_path),
+            "label_raster_path": str(self.label_raster_path),
+            "metrics_path": str(self.metrics_path),
+            "model_path": str(self.model_path),
+            "prediction_metadata_path": (
+                str(self.prediction_metadata_path) if self.prediction_metadata_path else None
+            ),
+            "prediction_output_root": (
+                str(self.prediction_output_root) if self.prediction_output_root is not None else None
+            ),
+            "prediction_raster_path": (
+                str(self.prediction_raster_path) if self.prediction_raster_path else None
+            ),
+            "qc_manifest_path": str(self.qc_manifest_path),
+            "sample_cache_manifest_path": (
+                str(self.sample_cache_manifest_path)
+                if self.sample_cache_manifest_path is not None
+                else None
+            ),
+            "sample_cache_root": (
+                str(self.sample_cache_root) if self.sample_cache_root is not None else None
+            ),
+            "source_image_id": self.source_image_id,
+            "tile_id": self.tile_id,
+            "training_metadata_path": str(self.training_metadata_path),
+            "training_output_root": str(self.training_output_root),
+            "training_table_path": str(self.training_table_path),
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class SkippedFeatureResult:
@@ -70,6 +109,14 @@ class SkippedFeatureResult:
     feature_raster_path: Path
     reason: str
     source_image_id: str | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "feature_id": self.feature_id,
+            "feature_raster_path": str(self.feature_raster_path),
+            "reason": self.reason,
+            "source_image_id": self.source_image_id,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +132,25 @@ class BaselinePipelineResult:
     reference_path: Path
     skipped_features: tuple[SkippedFeatureResult, ...]
     sample_cache_root: Path | None
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-safe representation of this pipeline result."""
+        return {
+            "feature_count": len(self.feature_results),
+            "features": [f.to_dict() for f in self.feature_results],
+            "manifest_path": str(self.manifest_path) if self.manifest_path is not None else None,
+            "pipeline_manifest_path": str(self.pipeline_manifest_path),
+            "qc_manifest_path": str(self.qc_manifest_path),
+            "reference_input_path": str(self.reference_input_path),
+            "reference_manifest_path": (
+                str(self.reference_manifest_path) if self.reference_manifest_path is not None else None
+            ),
+            "reference_path": str(self.reference_path),
+            "sample_cache_root": (
+                str(self.sample_cache_root) if self.sample_cache_root is not None else None
+            ),
+            "skipped_feature_count": len(self.skipped_features),
+        }
 
 
 def _default_aoi_label(
@@ -136,18 +202,6 @@ def _build_training_spec(
         nodata_label=nodata_label,
     )
 
-
-def _reference_manifest_path(reference_path: Path | str) -> Path | None:
-    resolved = Path(reference_path)
-    candidates = (
-        resolved.with_suffix(".json"),
-        resolved.parent / "manifest.json",
-        resolved.parent.parent / "manifest.json",
-    )
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
 
 def _download_summary_by_image_id(
     manifest_payload: dict[str, object] | None,
@@ -222,51 +276,27 @@ def _feature_tile_id(feature: object) -> str:
     )
 
 
-def _feature_result_payload(feature: PipelineFeatureResult) -> dict[str, object]:
+def _requested_aoi_payload(requested_aoi: dict[str, object] | None) -> dict[str, object] | None:
+    if requested_aoi is None:
+        return None
     return {
-        "feature_id": feature.feature_id,
-        "feature_raster_path": str(feature.feature_raster_path),
-        "label_mapping_path": str(feature.label_mapping_path),
-        "label_raster_path": str(feature.label_raster_path),
-        "metrics_path": str(feature.metrics_path),
-        "model_path": str(feature.model_path),
-        "prediction_metadata_path": (
-            str(feature.prediction_metadata_path) if feature.prediction_metadata_path else None
-        ),
-        "prediction_output_root": (
-            str(feature.prediction_output_root) if feature.prediction_output_root is not None else None
-        ),
-        "prediction_raster_path": (
-            str(feature.prediction_raster_path) if feature.prediction_raster_path else None
-        ),
-        "qc_manifest_path": str(feature.qc_manifest_path),
-        "sample_cache_manifest_path": (
-            str(feature.sample_cache_manifest_path) if feature.sample_cache_manifest_path is not None else None
-        ),
-        "sample_cache_root": (
-            str(feature.sample_cache_root) if feature.sample_cache_root is not None else None
-        ),
-        "source_image_id": feature.source_image_id,
-        "tile_id": feature.tile_id,
-        "training_metadata_path": str(feature.training_metadata_path),
-        "training_output_root": str(feature.training_output_root),
-        "training_table_path": str(feature.training_table_path),
+        "bounds": list(requested_aoi["bounds"]),
+        "crs": requested_aoi["crs"],
+        "source": requested_aoi["source"],
     }
 
 
-def _qc_feature_payload(
+def _build_qc_feature_payload(
     feature: PipelineFeatureResult,
     *,
     download_summary: dict[str, dict[str, object]],
     qc_output_dir: Path,
     requested_aoi: dict[str, object] | None,
 ) -> dict[str, object]:
+    """Build the QC payload for one processed feature raster."""
     feature_spec = read_feature_raster_spec(feature.feature_raster_path)
     label_payload = json.loads(feature.label_mapping_path.read_text(encoding="utf-8"))
-    requested_window = requested_aoi_window(
-        feature.feature_raster_path,
-        requested_aoi,
-    )
+    requested_window = requested_aoi_window(feature.feature_raster_path, requested_aoi)
     qc_png_path = qc_output_dir / f"{feature.feature_id}.png"
     write_qc_overlay_png(
         feature.feature_raster_path,
@@ -301,7 +331,9 @@ def _qc_feature_payload(
             str(feature.prediction_output_root) if feature.prediction_output_root is not None else None
         ),
         "sample_cache_manifest_path": (
-            str(feature.sample_cache_manifest_path) if feature.sample_cache_manifest_path is not None else None
+            str(feature.sample_cache_manifest_path)
+            if feature.sample_cache_manifest_path is not None
+            else None
         ),
         "sample_cache_root": (
             str(feature.sample_cache_root) if feature.sample_cache_root is not None else None
@@ -324,6 +356,63 @@ def _qc_feature_payload(
     }
 
 
+def _write_qc_manifest(
+    qc_manifest_path: Path,
+    *,
+    features: list[PipelineFeatureResult],
+    skipped_features: list[SkippedFeatureResult],
+    download_summary: dict[str, dict[str, object]],
+    requested_aoi: dict[str, object] | None,
+    spec: AlphaEarthTrainingSpec,
+    manifest_path: Path | str | None,
+    reference_path: Path | str,
+    resolved_reference_path: Path | str,
+    reference_manifest_path: Path | None,
+    sample_cache_dir: Path | None,
+    year: int,
+    tile_id: str | None = None,
+) -> None:
+    """Write one QC manifest covering the given features."""
+    qc_output_dir = qc_manifest_path.parent
+    qc_output_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "aoi_label": spec.alphaearth.aoi_label,
+        "feature_count": len(features),
+        "features": [
+            _build_qc_feature_payload(
+                feature,
+                download_summary=download_summary,
+                qc_output_dir=qc_output_dir,
+                requested_aoi=requested_aoi,
+            )
+            for feature in features
+        ],
+        "manifest_path": str(manifest_path) if manifest_path is not None else None,
+        "reference_input_path": str(Path(reference_path)),
+        "reference_manifest_path": (
+            str(reference_manifest_path) if reference_manifest_path is not None else None
+        ),
+        "reference_path": str(resolved_reference_path),
+        "reference_summary": reference_summary(resolved_reference_path),
+        "requested_aoi": _requested_aoi_payload(requested_aoi),
+        "sample_cache_manifest_paths": [
+            str(f.sample_cache_manifest_path)
+            for f in features
+            if f.sample_cache_manifest_path is not None
+        ],
+        "sample_cache_root": str(sample_cache_dir) if sample_cache_dir is not None else None,
+        "skipped_feature_count": len(skipped_features),
+        "skipped_features": [sf.to_dict() for sf in skipped_features],
+        "year": year,
+    }
+    if tile_id is not None:
+        payload["tile_id"] = tile_id
+    qc_manifest_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 def run_baseline_pipeline(
     *,
     feature_input: Path | str | None,
@@ -335,7 +424,7 @@ def run_baseline_pipeline(
     label_column: str = "lucode",
     geometry_column: str = "geometry",
     label_mode: str = "centroid_to_pixel",
-    overlap_policy: str = "error",
+    overlap_policy: str = "first",
     all_touched: bool = False,
     nodata_label: int = -1,
     test_size: float = 0.2,
@@ -345,6 +434,7 @@ def run_baseline_pipeline(
     max_train_rows: int | None = None,
     predict: bool = True,
     skip_empty_labels: bool = True,
+    skip_completed: bool = False,
 ) -> BaselinePipelineResult:
     """Run the baseline pipeline across one or more native AlphaEarth rasters."""
 
@@ -356,6 +446,8 @@ def run_baseline_pipeline(
         manifest_path=manifest_path,
         requested_year=year,
     )
+    logger.info("Discovered %d feature raster(s) for year %d", len(discovered), year)
+
     spec = _build_training_spec(
         feature_input=feature_input,
         manifest_path=manifest_path,
@@ -427,10 +519,23 @@ def run_baseline_pipeline(
     manifest_payload = load_manifest_payload(manifest_path)
     requested_aoi = requested_aoi_from_manifest(manifest_payload)
     download_summary = _download_summary_by_image_id(manifest_payload)
-    reference_manifest_path = _reference_manifest_path(resolved_reference_path)
+    reference_manifest_path = find_reference_manifest(resolved_reference_path)
 
     for feature in discovered:
         tile_id = _feature_tile_id(feature)
+        training_output_dir = training_tile_output_root(
+            output_root,
+            tile_id,
+            year,
+            namespace=model_output_namespace,
+        )
+
+        # Idempotency: skip tiles whose QC manifest already exists
+        expected_qc_path = training_output_dir / "qc" / "run_qc.json"
+        if skip_completed and expected_qc_path.exists():
+            logger.info("Skipping completed tile %s (QC manifest exists)", tile_id)
+            continue
+
         reference_output_dir = reference_tile_output_root(
             output_root,
             tile_id,
@@ -448,6 +553,7 @@ def run_baseline_pipeline(
         except NoReferenceCoverageError as exc:
             if not skip_empty_labels:
                 raise
+            logger.warning("Skipping tile %s: %s", tile_id, exc)
             skipped_features.append(
                 SkippedFeatureResult(
                     feature_id=feature.feature_id,
@@ -464,12 +570,6 @@ def run_baseline_pipeline(
             feature_id=feature.feature_id,
             label_mapping_path=rasterized.label_mapping_path,
             source_image_id=feature.source_image_id,
-        )
-        training_output_dir = training_tile_output_root(
-            output_root,
-            tile_id,
-            year,
-            namespace=model_output_namespace,
         )
         training_table = build_training_table_from_pairs(
             [training_pair],
@@ -491,6 +591,8 @@ def run_baseline_pipeline(
                 "year": year,
             },
         )
+        logger.info("Tile %s: %d training rows", tile_id, training_table.row_count)
+
         trained = train_random_forest(
             training_table.table_path,
             training_output_dir / "model",
@@ -535,7 +637,7 @@ def run_baseline_pipeline(
             prediction_output_root=prediction_output_dir,
             prediction_metadata_path=prediction_metadata_path,
             prediction_raster_path=prediction_raster_path,
-            qc_manifest_path=training_output_dir / "qc" / "run_qc.json",
+            qc_manifest_path=expected_qc_path,
             sample_cache_manifest_path=training_table.sample_cache_manifest_path,
             sample_cache_root=training_table.sample_cache_root,
             source_image_id=feature.source_image_id,
@@ -543,115 +645,43 @@ def run_baseline_pipeline(
             training_output_root=training_output_dir,
             training_table_path=training_table.table_path,
         )
-        feature_result.qc_manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        feature_result.qc_manifest_path.write_text(
-            json.dumps(
-                {
-                    "aoi_label": spec.alphaearth.aoi_label,
-                    "feature_count": 1,
-                    "features": [
-                        _qc_feature_payload(
-                            feature_result,
-                            download_summary=download_summary,
-                            qc_output_dir=feature_result.qc_manifest_path.parent,
-                            requested_aoi=requested_aoi,
-                        )
-                    ],
-                    "manifest_path": str(manifest_path) if manifest_path is not None else None,
-                    "reference_input_path": str(Path(reference_path)),
-                    "reference_manifest_path": (
-                        str(reference_manifest_path) if reference_manifest_path is not None else None
-                    ),
-                    "reference_path": str(resolved_reference_path),
-                    "reference_summary": reference_summary(resolved_reference_path),
-                    "requested_aoi": (
-                        {
-                            "bounds": list(requested_aoi["bounds"]),
-                            "crs": requested_aoi["crs"],
-                            "source": requested_aoi["source"],
-                        }
-                        if requested_aoi is not None
-                        else None
-                    ),
-                    "sample_cache_manifest_path": (
-                        str(feature_result.sample_cache_manifest_path)
-                        if feature_result.sample_cache_manifest_path is not None
-                        else None
-                    ),
-                    "sample_cache_root": (
-                        str(feature_result.sample_cache_root)
-                        if feature_result.sample_cache_root is not None
-                        else None
-                    ),
-                    "skipped_feature_count": 0,
-                    "skipped_features": [],
-                    "tile_id": feature_result.tile_id,
-                    "year": year,
-                },
-                indent=2,
-                sort_keys=True,
-            ),
-            encoding="utf-8",
+        _write_qc_manifest(
+            feature_result.qc_manifest_path,
+            features=[feature_result],
+            skipped_features=[],
+            download_summary=download_summary,
+            requested_aoi=requested_aoi,
+            spec=spec,
+            manifest_path=manifest_path,
+            reference_path=reference_path,
+            resolved_reference_path=resolved_reference_path,
+            reference_manifest_path=reference_manifest_path,
+            sample_cache_dir=training_table.sample_cache_root,
+            year=year,
+            tile_id=feature_result.tile_id,
         )
         processed_features.append(feature_result)
+        logger.info("Tile %s: complete", tile_id)
 
     if not processed_features:
         raise ValueError("No discovered feature rasters produced usable CROME labels.")
+
+    # Batch-level QC manifest
     qc_output_dir = batch_output_dir / "qc"
-    qc_output_dir.mkdir(parents=True, exist_ok=True)
     qc_manifest_path = qc_output_dir / "run_qc.json"
-    qc_manifest_path.write_text(
-        json.dumps(
-            {
-                "aoi_label": spec.alphaearth.aoi_label,
-                "feature_count": len(processed_features),
-                "features": [
-                    _qc_feature_payload(
-                        feature,
-                        download_summary=download_summary,
-                        qc_output_dir=qc_output_dir,
-                        requested_aoi=requested_aoi,
-                    )
-                    for feature in processed_features
-                ],
-                "manifest_path": str(manifest_path) if manifest_path is not None else None,
-                "reference_input_path": str(Path(reference_path)),
-                "reference_manifest_path": (
-                    str(reference_manifest_path) if reference_manifest_path is not None else None
-                ),
-                "reference_path": str(resolved_reference_path),
-                "reference_summary": reference_summary(resolved_reference_path),
-                "requested_aoi": (
-                    {
-                        "bounds": list(requested_aoi["bounds"]),
-                        "crs": requested_aoi["crs"],
-                        "source": requested_aoi["source"],
-                    }
-                    if requested_aoi is not None
-                    else None
-                ),
-                "sample_cache_manifest_paths": [
-                    str(feature.sample_cache_manifest_path)
-                    for feature in processed_features
-                    if feature.sample_cache_manifest_path is not None
-                ],
-                "sample_cache_root": str(sample_cache_dir),
-                "skipped_feature_count": len(skipped_features),
-                "skipped_features": [
-                    {
-                        "feature_id": feature.feature_id,
-                        "feature_raster_path": str(feature.feature_raster_path),
-                        "reason": feature.reason,
-                        "source_image_id": feature.source_image_id,
-                    }
-                    for feature in skipped_features
-                ],
-                "year": year,
-            },
-            indent=2,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
+    _write_qc_manifest(
+        qc_manifest_path,
+        features=processed_features,
+        skipped_features=skipped_features,
+        download_summary=download_summary,
+        requested_aoi=requested_aoi,
+        spec=spec,
+        manifest_path=manifest_path,
+        reference_path=reference_path,
+        resolved_reference_path=resolved_reference_path,
+        reference_manifest_path=reference_manifest_path,
+        sample_cache_dir=sample_cache_dir,
+        year=year,
     )
 
     pipeline_manifest_path = batch_output_dir / "pipeline.json"
@@ -659,7 +689,7 @@ def run_baseline_pipeline(
     pipeline_payload = {
         "aoi_label": spec.alphaearth.aoi_label,
         "feature_count": len(processed_features),
-        "features": [_feature_result_payload(feature) for feature in processed_features],
+        "features": [f.to_dict() for f in processed_features],
         "manifest_path": str(manifest_path) if manifest_path is not None else None,
         "label_mode": spec.label_mode,
         "max_train_rows": max_train_rows,
@@ -673,27 +703,25 @@ def run_baseline_pipeline(
         "reference_path": str(resolved_reference_path),
         "reference_summary": reference_summary(resolved_reference_path),
         "sample_cache_manifest_paths": [
-            str(feature.sample_cache_manifest_path)
-            for feature in processed_features
-            if feature.sample_cache_manifest_path is not None
+            str(f.sample_cache_manifest_path)
+            for f in processed_features
+            if f.sample_cache_manifest_path is not None
         ],
         "sample_cache_root": str(sample_cache_dir),
         "skipped_feature_count": len(skipped_features),
-        "skipped_features": [
-            {
-                "feature_id": feature.feature_id,
-                "feature_raster_path": str(feature.feature_raster_path),
-                "reason": feature.reason,
-                "source_image_id": feature.source_image_id,
-            }
-            for feature in skipped_features
-        ],
+        "skipped_features": [sf.to_dict() for sf in skipped_features],
         "test_size": test_size,
         "year": year,
     }
     pipeline_manifest_path.write_text(
         json.dumps(pipeline_payload, indent=2, sort_keys=True),
         encoding="utf-8",
+    )
+
+    logger.info(
+        "Pipeline complete: %d features processed, %d skipped",
+        len(processed_features),
+        len(skipped_features),
     )
 
     return BaselinePipelineResult(
@@ -745,51 +773,9 @@ def build_parser() -> argparse.ArgumentParser:
             "otherwise data/alphaearth."
         ),
     )
-    parser.add_argument("--label-column", default="lucode", help="Reference class column.")
-    parser.add_argument("--geometry-column", default="geometry", help="Reference geometry column.")
-    parser.add_argument(
-        "--label-mode",
-        choices=("centroid_to_pixel", "polygon_to_pixel"),
-        default="centroid_to_pixel",
-        help="How CROME vector labels are transferred onto the AlphaEarth grid.",
-    )
-    parser.add_argument(
-        "--overlap-policy",
-        choices=("error", "first", "last"),
-        default="error",
-        help="Policy for overlapping reference polygons.",
-    )
-    parser.add_argument(
-        "--all-touched",
-        action="store_true",
-        help="Rasterize with all_touched=True instead of pixel-center semantics.",
-    )
-    parser.add_argument("--nodata-label", type=int, default=-1, help="Output nodata label id.")
-    parser.add_argument("--test-size", type=float, default=0.2, help="Evaluation holdout fraction.")
-    parser.add_argument("--random-state", type=int, default=42, help="Random seed.")
-    parser.add_argument("--n-estimators", type=int, default=200, help="Random forest tree count.")
-    parser.add_argument(
-        "--n-jobs",
-        type=int,
-        default=-1,
-        help="CPU parallelism passed to RandomForestClassifier for each tile-local model fit.",
-    )
-    parser.add_argument(
-        "--max-train-rows",
-        type=int,
-        default=None,
-        help="Optional cap on tile-local training rows after holdout splitting.",
-    )
-    parser.add_argument(
-        "--fail-on-empty-labels",
-        action="store_true",
-        help="Fail instead of skipping feature rasters that have no usable CROME coverage.",
-    )
-    parser.add_argument(
-        "--no-predict",
-        action="store_true",
-        help="Stop after training without emitting prediction rasters.",
-    )
+    add_reference_args(parser)
+    add_training_args(parser)
+    add_pipeline_behavior_args(parser)
     return parser
 
 
@@ -817,23 +803,10 @@ def main(argv: list[str] | None = None) -> int:
         predict=not args.no_predict,
         skip_empty_labels=not args.fail_on_empty_labels,
     )
-    payload = {
-        "feature_count": len(result.feature_results),
-        "features": [_feature_result_payload(feature) for feature in result.feature_results],
-        "manifest_path": str(result.manifest_path) if result.manifest_path is not None else None,
-        "max_train_rows": args.max_train_rows,
-        "n_estimators": args.n_estimators,
-        "n_jobs": args.n_jobs,
-        "pipeline_manifest_path": str(result.pipeline_manifest_path),
-        "qc_manifest_path": str(result.qc_manifest_path),
-        "reference_input_path": str(result.reference_input_path),
-        "reference_manifest_path": (
-            str(result.reference_manifest_path) if result.reference_manifest_path is not None else None
-        ),
-        "reference_path": str(result.reference_path),
-        "skipped_feature_count": len(result.skipped_features),
-        "sample_cache_root": str(result.sample_cache_root) if result.sample_cache_root is not None else None,
-        "test_size": args.test_size,
-    }
+    payload = result.to_dict()
+    payload["max_train_rows"] = args.max_train_rows
+    payload["n_estimators"] = args.n_estimators
+    payload["n_jobs"] = args.n_jobs
+    payload["test_size"] = args.test_size
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0

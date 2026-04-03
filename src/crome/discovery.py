@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,6 +13,8 @@ from typing import Any
 
 from .features import read_feature_raster_spec
 from .paths import feature_artifact_name, feature_tile_name
+
+logger = logging.getLogger(__name__)
 
 _MANIFEST_PATH_KEYS = (
     "path",
@@ -182,7 +185,8 @@ def _build_feature_record(
         return None
     try:
         read_feature_raster_spec(raster_path)
-    except Exception:
+    except (ValueError, OSError) as exc:
+        logger.debug("Skipping invalid raster %s: %s", raster_path, exc)
         return None
     return DiscoveredFeatureRaster(
         feature_id=feature_artifact_name(feature_id or raster_path),

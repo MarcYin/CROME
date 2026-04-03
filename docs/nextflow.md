@@ -1,66 +1,107 @@
 # Nextflow on JASMIN
 
-The repo includes a Slurm-oriented Nextflow wrapper in [main.nf](/home/users/marcyin/UK_crop_map/nextflow/main.nf) with queue profiles in [nextflow.config](/home/users/marcyin/UK_crop_map/nextflow/nextflow.config).
-GitHub Actions installs Nextflow and runs a small local smoke test for this wrapper on every push to `main`.
+The repository includes a Slurm-oriented Nextflow wrapper under `nextflow/main.nf` with queue profiles in `nextflow/nextflow.config`.
 
 It does not replace the Python pipeline. It schedules the existing `crome` commands in a cluster-friendly order:
 
-1. `crome prepare-tile-batch` discovers AlphaEarth tiles, materializes one shared CROME subset for the batch, and writes one tile-plan JSON per AlphaEarth tile.
-2. `nextflow/main.nf` takes the emitted `batch_manifest.json` and runs one `crome run-tile-plan` task per tile-plan JSON.
-3. The resulting tile-result JSON files are optionally gathered into one `crome train-pooled-from-tile-results` task.
+1. **Prepare** -- `crome prepare-tile-batch` runs on the login node. It discovers AlphaEarth tiles, materializes one shared CROME subset, and writes one tile-plan JSON per tile.
+2. **Fan out** -- Nextflow reads the batch manifest and runs one `crome run-tile-plan` task per tile in parallel across Slurm.
+3. **Gather** -- The tile-result JSONs are optionally collected into one `crome train-pooled-from-tile-results` task for a regional or national model.
 
-That keeps tile identity, subset reuse, cache reuse, and pooled-training provenance intact while letting Slurm parallelize the expensive work.
+Tile identity, subset reuse, cache reuse, and pooled-training provenance are preserved throughout.
+
+## Prerequisites
+
+Nextflow is **not** bundled with the Python package. Install it in your JASMIN environment:
+
+```bash
+curl -s https://get.nextflow.io | bash
+./nextflow -version
+```
+
+Java 11+ is required (Java 17 recommended). On JASMIN, check `module avail java` or install via conda.
 
 ## Queue mapping
 
-The current JASMIN Slurm queue guidance supports this split:
-
-- `debug` partition with QoS `debug`: up to `8` CPUs for `1 hour`; use for the lightweight batch-planning/control step.
-- `standard` partition with QoS `high`: up to `96` CPUs, `48 hours`, and `1000 GB` per job; use for per-tile training or pooled training when you want multi-core random-forest fits.
-- `special` partition with QoS `special`: access-controlled, backed by `6 TB` / `192` core nodes, with jobs allowed up to `96` CPUs, `48 hours`, and `3000 GB`; use only if your account has access.
+| Partition | QoS | Max CPUs | Max memory | Max time | Use case |
+|-----------|-----|----------|------------|----------|----------|
+| `debug` | `debug` | 8 | -- | 1 h | Batch planning / control |
+| `standard` | `high` | 96 | 1000 GB | 48 h | Per-tile training |
+| `special` | `special` | 96 | 3000 GB | 48 h | High-memory pooled training |
 
 Source: <https://help.jasmin.ac.uk/docs/batch-computing/slurm-queues/>
 
 ## Typical run
 
+### Step 1: Prepare the batch
+
+Run on the login node (no Slurm allocation needed):
+
 ```bash
 crome prepare-tile-batch \
-  --manifest-path /gws/ssde/j25a/nceo_isp/public/CROME/raw/alphaearth/AEF_cambridge-fringe-smoke_annual_embedding_2024/manifests/run-20260330T213729Z.json \
-  --reference-path /gws/ssde/j25a/nceo_isp/public/CROME/raw/crome/CROME_2024_national/extracted/Crop_Map_of_England_CROME_2024.gpkg \
+  --manifest-path /gws/.../raw/alphaearth/AEF_..._2024/manifests/run.json \
+  --reference-path /gws/.../raw/crome/CROME_2024_national/extracted/Crop_Map_of_England_CROME_2024.gpkg \
   --output-root /gws/ssde/j25a/nceo_isp/public/CROME \
   --year 2024 \
   --aoi-label cambridge-norfolk-2024
+```
 
-nextflow run nextflow/main.nf -c nextflow/nextflow.config -profile jasmin \
-  --batch_manifest /gws/ssde/j25a/nceo_isp/public/CROME/workflow/<tile-batch-namespace>/BATCH_cambridge-norfolk-2024_2024/batch_manifest.json \
+This emits a `batch_manifest.json` and per-tile plans under the workflow directory.
+
+### Step 2: Launch Nextflow
+
+```bash
+nextflow run nextflow/main.nf \
+  -c nextflow/nextflow.config \
+  -profile jasmin \
+  --batch_manifest /gws/.../workflow/<namespace>/BATCH_cambridge-norfolk-2024_2024/batch_manifest.json \
   --output_root /gws/ssde/j25a/nceo_isp/public/CROME \
-  --tile_partition standard \
-  --tile_qos high \
   --tile_cpus 16 \
   --tile_memory '128 GB' \
-  --pooled_partition standard \
-  --pooled_qos high \
   --pooled_cpus 64 \
   --pooled_memory '512 GB' \
   --slurm_account my-gws
 ```
 
-If you have access to the high-memory `special` partition, switch to:
+### Step 3 (optional): Special partition
+
+If your account has access to the high-memory `special` partition:
 
 ```bash
-nextflow run nextflow/main.nf -c nextflow/nextflow.config -profile jasmin_special \
+nextflow run nextflow/main.nf \
+  -c nextflow/nextflow.config \
+  -profile jasmin_special \
   --batch_manifest /path/to/batch_manifest.json \
   --output_root /gws/ssde/j25a/nceo_isp/public/CROME \
   --slurm_account my-gws
 ```
 
+## Nextflow parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--batch_manifest` | required | Path to the prepared batch manifest JSON |
+| `--output_root` | from batch | Override output root for all tasks |
+| `--run_pooled_model` | `true` | Run the pooled training step after tile jobs |
+| `--tile_cpus` | profile default | CPUs allocated per tile task |
+| `--tile_memory` | profile default | Memory per tile task |
+| `--tile_n_jobs` | `tile_cpus` | RandomForest CPU parallelism per tile |
+| `--pooled_cpus` | profile default | CPUs for pooled training |
+| `--pooled_memory` | profile default | Memory for pooled training |
+| `--pooled_n_jobs` | `pooled_cpus` | RandomForest CPU parallelism for pooled model |
+| `--tile_array_size` | 128 | Group tile jobs into Slurm arrays |
+| `--slurm_account` | none | Slurm account for job submission |
+| `--max_train_rows` | none | Cap pooled training rows |
+| `--n_estimators` | none | Override tree count for pooled model |
+| `--python` | `python` | Python executable path |
+
 ## Notes
 
-- Use `prepare-tile-batch --manifest-path` when you want the workflow to preserve the original `edown` source-image identity for each AlphaEarth tile.
-- Use `prepare-tile-batch --feature-input` when you already have a directory tree of AlphaEarth GeoTIFFs and do not need manifest metadata.
-- The JASMIN profiles set `cache = 'lenient'`, which Nextflow documents as a workaround for shared-filesystem timestamp inconsistencies.
-- The tile stage can be grouped into Slurm job arrays with `--tile_array_size <N>` to reduce scheduler overhead when you have many AlphaEarth tiles.
-- The Nextflow wrapper reads rasters in place from the shared filesystem; it does not stage the full AlphaEarth GeoTIFFs into each task directory.
-- Each tile plan points at the same prepared CROME subset for the batch, so the expensive reference clipping work happens once.
-- Per-tile labels, models, predictions, and sample caches still come from the existing Python code, so pooled training remains compatible with `crome train-pooled-model`.
-- Nextflow itself is not bundled with the Python package. Load or install it in your JASMIN software environment before running the workflow.
+- Use `--manifest-path` with `prepare-tile-batch` to preserve edown source-image identity for each tile.
+- Use `--feature-input` when you have a directory of GeoTIFFs without an edown manifest.
+- The JASMIN profiles set `cache = 'lenient'` as a workaround for shared-filesystem timestamp inconsistencies.
+- `--tile_array_size` groups tile jobs into Slurm job arrays to reduce scheduler overhead.
+- Rasters are read in place from the shared filesystem; Nextflow does not stage full GeoTIFFs into task directories.
+- Each tile plan references the same prepared CROME subset, so the reference clipping happens once.
+- Per-tile outputs (labels, models, predictions, sample caches) are written by the Python pipeline, so pooled training via `crome train-pooled-model` remains compatible.
+- GitHub Actions installs Nextflow and runs a local smoke test against the wrapper on every push to `main`.

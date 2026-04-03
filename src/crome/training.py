@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import pickle
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import joblib
 import numpy as np
 import pandas as pd
 import rasterio
@@ -22,6 +23,8 @@ from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from .features import read_feature_raster_spec, valid_feature_mask
 from .paths import feature_artifact_name
 from .schema import alphaearth_feature_columns
+
+logger = logging.getLogger(__name__)
 
 _TRAINING_SAMPLE_CACHE_SCHEMA_VERSION = 1
 
@@ -1121,17 +1124,21 @@ def train_random_forest(
 
     model_path = output_dir / "model.pkl"
     metrics_path = output_dir / "metrics.json"
-    with model_path.open("wb") as file:
-        pickle.dump(
-            {
-                "feature_names": feature_names,
-                "label_column": label_column,
-                "label_mapping": label_mapping,
-                "model": model,
-            },
-            file,
-        )
+    joblib.dump(
+        {
+            "feature_names": feature_names,
+            "label_column": label_column,
+            "label_mapping": label_mapping,
+            "model": model,
+        },
+        model_path,
+        compress=3,
+    )
     metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8")
+    logger.info(
+        "Trained %s on %d rows (%s evaluation)",
+        type(model).__name__, fit_row_count, evaluation_mode,
+    )
 
     return TrainedModelResult(metrics_path=metrics_path, model_path=model_path, row_count=int(table.shape[0]))
 

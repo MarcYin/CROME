@@ -5,12 +5,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .acquisition.crome import materialize_crome_reference_subset
+from .cli_args import add_pipeline_behavior_args, add_reference_args, add_training_args
 from .discovery import discover_feature_rasters
+from .manifest import find_reference_manifest
 from .paths import (
     feature_tile_name,
     pooled_training_output_root,
@@ -19,6 +22,8 @@ from .paths import (
 )
 from .pipeline import BaselinePipelineResult, run_baseline_pipeline
 from .training import PooledTrainingResult, train_pooled_model_from_pipeline_manifests
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,19 +68,6 @@ def _default_batch_label(
     return "batch"
 
 
-def _reference_manifest_path(reference_path: Path | str) -> Path | None:
-    resolved = Path(reference_path)
-    candidates = (
-        resolved.with_suffix(".json"),
-        resolved.parent / "manifest.json",
-        resolved.parent.parent / "manifest.json",
-    )
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
-
-
 def _workflow_namespace(payload: dict[str, object]) -> str:
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
     return f"tile_batch_{digest}"
@@ -86,61 +78,6 @@ def _load_json_payload(path: Path | str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"Expected a JSON object in {path}.")
     return payload
-
-
-def _pipeline_result_payload(result: BaselinePipelineResult) -> dict[str, object]:
-    return {
-        "feature_count": len(result.feature_results),
-        "features": [
-            {
-                "feature_id": feature.feature_id,
-                "feature_raster_path": str(feature.feature_raster_path),
-                "label_mapping_path": str(feature.label_mapping_path),
-                "label_raster_path": str(feature.label_raster_path),
-                "metrics_path": str(feature.metrics_path),
-                "model_path": str(feature.model_path),
-                "prediction_metadata_path": (
-                    str(feature.prediction_metadata_path)
-                    if feature.prediction_metadata_path is not None
-                    else None
-                ),
-                "prediction_output_root": (
-                    str(feature.prediction_output_root)
-                    if feature.prediction_output_root is not None
-                    else None
-                ),
-                "prediction_raster_path": (
-                    str(feature.prediction_raster_path)
-                    if feature.prediction_raster_path is not None
-                    else None
-                ),
-                "qc_manifest_path": str(feature.qc_manifest_path),
-                "sample_cache_manifest_path": (
-                    str(feature.sample_cache_manifest_path)
-                    if feature.sample_cache_manifest_path is not None
-                    else None
-                ),
-                "sample_cache_root": (
-                    str(feature.sample_cache_root) if feature.sample_cache_root is not None else None
-                ),
-                "source_image_id": feature.source_image_id,
-                "tile_id": feature.tile_id,
-                "training_metadata_path": str(feature.training_metadata_path),
-                "training_output_root": str(feature.training_output_root),
-                "training_table_path": str(feature.training_table_path),
-            }
-            for feature in result.feature_results
-        ],
-        "pipeline_manifest_path": str(result.pipeline_manifest_path),
-        "qc_manifest_path": str(result.qc_manifest_path),
-        "reference_input_path": str(result.reference_input_path),
-        "reference_manifest_path": (
-            str(result.reference_manifest_path) if result.reference_manifest_path is not None else None
-        ),
-        "reference_path": str(result.reference_path),
-        "sample_cache_root": str(result.sample_cache_root) if result.sample_cache_root is not None else None,
-        "skipped_feature_count": len(result.skipped_features),
-    }
 
 
 def prepare_tile_batch(
@@ -154,7 +91,7 @@ def prepare_tile_batch(
     label_column: str = "lucode",
     geometry_column: str = "geometry",
     label_mode: str = "centroid_to_pixel",
-    overlap_policy: str = "error",
+    overlap_policy: str = "first",
     all_touched: bool = False,
     nodata_label: int = -1,
     test_size: float = 0.2,
@@ -185,13 +122,15 @@ def prepare_tile_batch(
         manifest_path=resolved_manifest_path,
         requested_year=year,
     )
+    logger.info("Discovered %d feature raster(s) for batch '%s'", len(discovered), batch_label)
+
     resolved_reference_path = materialize_crome_reference_subset(
         resolved_reference_input,
         feature_raster_paths=[feature.raster_path for feature in discovered],
         subset_label=batch_label,
         year=year,
     )
-    reference_manifest_path = _reference_manifest_path(resolved_reference_path)
+    reference_manifest_path = find_reference_manifest(resolved_reference_path)
 
     namespace = _workflow_namespace(
         {
@@ -326,6 +265,7 @@ def prepare_tile_batch(
         ),
         encoding="utf-8",
     )
+    logger.info("Prepared %d tile plan(s) for batch '%s'", len(tile_manifest_paths), batch_label)
     return PreparedTileBatchResult(
         batch_label=batch_label,
         batch_manifest_path=batch_manifest_path,
@@ -351,6 +291,7 @@ def run_tile_plan(tile_plan_path: Path | str, *, n_jobs_override: int | None = N
         else int(payload.get("n_jobs", -1))
     )
     batch_manifest_path = Path(str(payload["batch_manifest_path"]))
+    logger.info("Running tile plan %s", resolved_tile_plan_path.name)
     result = run_baseline_pipeline(
         feature_input=payload["feature_raster_path"],
         manifest_path=None,
@@ -428,6 +369,9 @@ def train_pooled_from_tile_results(
     if resolved_max_train_rows is None and pooled_payload.get("max_train_rows") is not None:
         resolved_max_train_rows = int(pooled_payload["max_train_rows"])
 
+    logger.info(
+        "Training pooled model from %d tile result(s)", len(resolved_tile_result_paths)
+    )
     return train_pooled_model_from_pipeline_manifests(
         pipeline_manifest_paths,
         resolved_output_dir,
@@ -449,43 +393,9 @@ def build_prepare_tile_batch_parser() -> argparse.ArgumentParser:
     parser.add_argument("--year", required=True, type=int, help="Reference year.")
     parser.add_argument("--output-root", required=True, help="Base output directory.")
     parser.add_argument("--aoi-label", default=None, help="Optional human-readable batch label.")
-    parser.add_argument("--label-column", default="lucode", help="Reference class column.")
-    parser.add_argument("--geometry-column", default="geometry", help="Reference geometry column.")
-    parser.add_argument(
-        "--label-mode",
-        choices=("centroid_to_pixel", "polygon_to_pixel"),
-        default="centroid_to_pixel",
-        help="How vector labels are transferred onto the AlphaEarth grid.",
-    )
-    parser.add_argument(
-        "--overlap-policy",
-        choices=("error", "first", "last"),
-        default="error",
-        help="Policy for overlapping reference polygons.",
-    )
-    parser.add_argument("--all-touched", action="store_true", help="Rasterize with all_touched=True.")
-    parser.add_argument("--nodata-label", type=int, default=-1, help="Output nodata label id.")
-    parser.add_argument("--test-size", type=float, default=0.2, help="Evaluation holdout fraction.")
-    parser.add_argument("--random-state", type=int, default=42, help="Random seed.")
-    parser.add_argument("--n-estimators", type=int, default=200, help="Random forest tree count.")
-    parser.add_argument(
-        "--n-jobs",
-        type=int,
-        default=-1,
-        help="CPU parallelism passed to RandomForestClassifier for tile-local and pooled fits.",
-    )
-    parser.add_argument(
-        "--max-train-rows",
-        type=int,
-        default=None,
-        help="Optional pooled-training cap to persist in the batch manifest.",
-    )
-    parser.add_argument("--no-predict", action="store_true", help="Skip per-tile prediction rasters.")
-    parser.add_argument(
-        "--fail-on-empty-labels",
-        action="store_true",
-        help="Fail instead of skipping tiles with no usable CROME coverage.",
-    )
+    add_reference_args(parser)
+    add_training_args(parser)
+    add_pipeline_behavior_args(parser)
     return parser
 
 
@@ -583,7 +493,7 @@ def main_run_tile_plan(argv: list[str] | None = None) -> int:
     parser = build_run_tile_plan_parser()
     args = parser.parse_args(argv)
     result = run_tile_plan(args.tile_plan, n_jobs_override=args.n_jobs)
-    payload = _pipeline_result_payload(result.pipeline)
+    payload = result.pipeline.to_dict()
     payload["batch_manifest_path"] = str(result.batch_manifest_path)
     payload["tile_plan_path"] = str(result.tile_plan_path)
     print(json.dumps(payload, indent=2, sort_keys=True))

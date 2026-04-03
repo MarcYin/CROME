@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,7 @@ import numpy as np
 import pandas as pd
 import pyogrio
 import rasterio
+from rasterio.errors import CRSError
 from rasterio.features import rasterize
 from rasterio.transform import rowcol
 from rasterio.warp import transform_bounds
@@ -22,6 +24,8 @@ from .config import AlphaEarthDownloadRequest, AlphaEarthTrainingSpec, CromeRefe
 from .features import read_feature_raster_spec
 from .paths import OUTPUT_ROOT_ENV_VAR, default_output_root
 from .runtime import ensure_proj_data_env
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +76,8 @@ def _reference_bbox_in_source_crs(
 
     try:
         return transform_bounds(feature_crs, source_crs, *feature_bounds, densify_pts=21)
-    except Exception:
+    except (CRSError, ValueError, RuntimeError) as exc:
+        logger.debug("Could not transform bounds from %s to %s: %s", feature_crs, source_crs, exc)
         return None
 
 
@@ -422,6 +427,10 @@ def rasterize_crome_reference(
         )
     if not np.any(label_array != spec.nodata_label):
         raise NoReferenceCoverageError("Reference geometries rasterized to no labeled pixels.")
+    logger.debug(
+        "Rasterized %d reference features onto %dx%d grid",
+        len(gdf), feature_spec.height, feature_spec.width,
+    )
     label_stats = _label_array_stats(label_array, spec.nodata_label)
     centroid_bounds = None
     if not gdf.empty:
@@ -509,7 +518,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--overlap-policy",
         choices=("error", "first", "last"),
-        default="error",
+        default="first",
         help="Policy for overlapping reference polygons.",
     )
     parser.add_argument(

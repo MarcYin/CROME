@@ -1,9 +1,13 @@
 site_name: CROME
-site_description: UK crop mapping migration notes and package docs.
+site_description: 10 m UK crop classification with AlphaEarth embeddings and CROME references.
 site_url: https://marcyin.github.io/CROME/
 theme:
   name: material
 nav:
   - Home: index.md
-  - Migration: migration.md
-  - Nextflow: nextflow.md
+  - Installation: installation.md
+  - Architecture: architecture.md
+  - CLI reference: cli.md
+  - Configuration: configuration.md
+  - Nextflow on JASMIN: nextflow.md
+  - Migration status: migration.md

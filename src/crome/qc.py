@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
 import pyogrio
 import rasterio
 from rasterio.enums import Resampling
+from rasterio.errors import CRSError
 from rasterio.transform import rowcol
 from rasterio.warp import transform_bounds
 from shapely.geometry import shape
 
 from .features import read_feature_raster_spec
 from .runtime import ensure_proj_data_env
+
+logger = logging.getLogger(__name__)
 
 
 def reference_summary(reference_path: Path | str) -> dict[str, object]:
@@ -116,7 +120,8 @@ def requested_aoi_window(
             *requested_bounds,
             densify_pts=21,
         )
-    except Exception:
+    except (CRSError, ValueError, RuntimeError) as exc:
+        logger.debug("Could not project AOI window: %s", exc)
         return None
 
     rows: list[int] = []

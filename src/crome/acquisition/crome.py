@@ -15,6 +15,7 @@ from typing import Any, Callable, Sequence
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
+import geopandas as gpd
 import pyogrio
 from rasterio.warp import transform_bounds
 
@@ -25,6 +26,7 @@ from crome.paths import (
     crome_archive_path,
     crome_download_root,
     crome_extract_root,
+    crome_footprint_root,
     crome_normalized_root,
     default_output_root,
     sanitize_label,
@@ -122,6 +124,33 @@ class CromeSubsetResult:
     year: int
 
 
+@dataclass(frozen=True, slots=True)
+class CromeFootprintResult:
+    """Local result surface for one dissolved annual CROME footprint."""
+
+    feature_count: int
+    footprint_bounds: tuple[float, float, float, float]
+    footprint_path: Path
+    manifest_path: Path
+    output_root: Path
+    simplify_tolerance: float | None
+    source_layer: str | None
+    source_path: Path
+    year: int
+
+
+@dataclass(frozen=True, slots=True)
+class CromeReferenceFootprint:
+    """Spatial footprint summary for one year-specific CROME reference source."""
+
+    bounds: tuple[float, float, float, float]
+    bounds_lonlat: tuple[float, float, float, float]
+    crs: str | None
+    reference_path: Path
+    source_layer: str | None
+    year: int
+
+
 HttpGetter = Callable[[str, float], HttpResponse]
 FileDownloader = Callable[[str, Path, float], None]
 
@@ -166,6 +195,63 @@ def subset_result_to_dict(result: CromeSubsetResult) -> dict[str, Any]:
     }
 
 
+def footprint_result_to_dict(result: CromeFootprintResult) -> dict[str, Any]:
+    """Return a JSON-safe summary payload for one CROME footprint export."""
+
+    return {
+        "feature_count": result.feature_count,
+        "footprint_bounds": list(result.footprint_bounds),
+        "footprint_path": str(result.footprint_path),
+        "manifest_path": str(result.manifest_path),
+        "output_root": str(result.output_root),
+        "simplify_tolerance": result.simplify_tolerance,
+        "source_layer": result.source_layer,
+        "source_path": str(result.source_path),
+        "year": result.year,
+    }
+
+
+def reference_footprint(
+    reference_path: Path | str,
+    *,
+    year: int,
+) -> CromeReferenceFootprint:
+    """Return the year-specific CROME footprint in source CRS and lon/lat."""
+
+    ensure_proj_data_env()
+    resolved_reference_path = Path(reference_path)
+    source_layer: str | None = None
+    if resolved_reference_path.suffix.casefold() == ".gpkg":
+        source_layer = _canonical_reference_layer(resolved_reference_path, year)
+        info = pyogrio.read_info(resolved_reference_path, layer=source_layer)
+    else:
+        info = pyogrio.read_info(resolved_reference_path)
+
+    total_bounds = info.get("total_bounds")
+    if not hasattr(total_bounds, "__len__") or len(total_bounds) != 4:
+        raise CromeDownloadError(f"Could not determine bounds for {resolved_reference_path}.")
+    bounds = tuple(float(value) for value in total_bounds)
+    crs = info.get("crs")
+    if isinstance(crs, str) and crs:
+        bounds_lonlat = tuple(
+            float(value)
+            for value in transform_bounds(crs, "EPSG:4326", *bounds, densify_pts=21)
+        )
+    else:
+        raise CromeDownloadError(
+            f"Could not determine a CRS for {resolved_reference_path}; cannot derive lon/lat bounds."
+        )
+
+    return CromeReferenceFootprint(
+        bounds=bounds,
+        bounds_lonlat=bounds_lonlat,
+        crs=crs,
+        reference_path=resolved_reference_path,
+        source_layer=source_layer,
+        year=year,
+    )
+
+
 def _path_signature(path: Path) -> dict[str, object]:
     stat = path.stat()
     return {
@@ -185,6 +271,16 @@ def _subset_output_root(
     if reference_path.parent.name in {"extracted", "normalized"}:
         return reference_path.parent.parent / "subsets"
     return crome_download_root(output_root, year, variant_label="subset") / "subsets"
+
+
+def _footprint_output_root(
+    reference_path: Path,
+    output_root: Path | str,
+    year: int,
+) -> Path:
+    if reference_path.parent.name in {"extracted", "normalized", "subsets"}:
+        return reference_path.parent.parent / "footprints"
+    return crome_footprint_root(output_root, year, variant_label="footprint")
 
 
 def _is_valid_subset(subset_path: Path) -> bool:
@@ -218,6 +314,98 @@ def _subset_tile_set_id(tile_ids: Sequence[str], subset_label: str | None) -> st
         digest = hashlib.sha256(json.dumps(list(tile_ids), sort_keys=True).encode("utf-8")).hexdigest()[:12]
         return f"tiles_{len(tile_ids)}_{digest}"
     return sanitize_label(subset_label, default="aoi")
+
+
+def export_crome_footprint(
+    reference_path: Path | str,
+    *,
+    output_root: Path | str,
+    year: int,
+    footprint_label: str | None = None,
+    simplify_tolerance: float | None = None,
+    force: bool = False,
+) -> CromeFootprintResult:
+    """Materialize one dissolved annual CROME footprint as GeoJSON."""
+
+    ensure_proj_data_env()
+    resolved_reference_path = Path(reference_path)
+    preferred_source = _preferred_subset_source(resolved_reference_path, year=year)
+    if preferred_source is None:
+        source_path = resolved_reference_path
+        source_layer = (
+            _canonical_reference_layer(resolved_reference_path, year)
+            if resolved_reference_path.suffix.casefold() == ".gpkg"
+            else None
+        )
+    else:
+        source_path, source_layer = preferred_source
+
+    output_dir = _footprint_output_root(resolved_reference_path, output_root, year)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    footprint_name = sanitize_label(
+        footprint_label or source_layer or source_path.stem,
+        default=f"crome_{year}",
+    )
+    footprint_path = output_dir / f"{footprint_name}.geojson"
+    manifest_path = output_dir / f"{footprint_name}.json"
+    if force:
+        if footprint_path.exists():
+            footprint_path.unlink()
+        if manifest_path.exists():
+            manifest_path.unlink()
+    if footprint_path.exists() and manifest_path.exists() and not force:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return CromeFootprintResult(
+            feature_count=int(payload["feature_count"]),
+            footprint_bounds=tuple(float(value) for value in payload["footprint_bounds"]),
+            footprint_path=footprint_path,
+            manifest_path=manifest_path,
+            output_root=output_dir,
+            simplify_tolerance=payload.get("simplify_tolerance"),
+            source_layer=payload.get("source_layer"),
+            source_path=Path(payload["source_path"]),
+            year=int(payload["year"]),
+        )
+
+    frame = pyogrio.read_dataframe(source_path, layer=source_layer)
+    if frame.empty or frame.geometry is None:
+        raise CromeDownloadError(f"No geometries were found in {source_path}.")
+    frame = frame.loc[frame.geometry.notna() & ~frame.geometry.is_empty]
+    if frame.empty:
+        raise CromeDownloadError(f"No non-empty geometries were found in {source_path}.")
+
+    geometry = frame.geometry.union_all() if hasattr(frame.geometry, "union_all") else frame.unary_union
+    if geometry.is_empty:
+        raise CromeDownloadError(f"Resolved CROME footprint is empty for {source_path}.")
+    if simplify_tolerance is not None and simplify_tolerance > 0:
+        geometry = geometry.simplify(float(simplify_tolerance), preserve_topology=True)
+
+    footprint_frame = gpd.GeoDataFrame(
+        {
+            "year": [year],
+            "source_layer": [source_layer],
+            "source_path": [str(source_path)],
+        },
+        geometry=[geometry],
+        crs=frame.crs,
+    )
+    pyogrio.write_dataframe(footprint_frame, footprint_path, driver="GeoJSON")
+    result = CromeFootprintResult(
+        feature_count=len(frame),
+        footprint_bounds=tuple(float(value) for value in geometry.bounds),
+        footprint_path=footprint_path,
+        manifest_path=manifest_path,
+        output_root=output_dir,
+        simplify_tolerance=float(simplify_tolerance) if simplify_tolerance is not None else None,
+        source_layer=source_layer,
+        source_path=source_path,
+        year=year,
+    )
+    manifest_path.write_text(
+        json.dumps(footprint_result_to_dict(result), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return result
 
 
 def materialize_crome_subset(
@@ -815,6 +1003,8 @@ def materialize_crome_reference_subset(
     return subset.subset_path
 
 
+
+
 def download_crome_reference(
     request: CromeDownloadRequest,
     http_get: HttpGetter | None = None,
@@ -977,6 +1167,39 @@ def build_subset_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_footprint_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Export one dissolved annual CROME footprint GeoJSON from a managed reference."
+    )
+    parser.add_argument("--reference-path", required=True, help="Path to the CROME vector reference file.")
+    parser.add_argument("--year", required=True, type=int, help="Reference year.")
+    parser.add_argument(
+        "--output-root",
+        default=default_output_root(),
+        help=(
+            "Base directory for derived footprint artifacts. "
+            f"Defaults to ${OUTPUT_ROOT_ENV_VAR} when set, otherwise data/alphaearth."
+        ),
+    )
+    parser.add_argument(
+        "--footprint-label",
+        default=None,
+        help="Optional footprint label for the emitted GeoJSON and manifest filenames.",
+    )
+    parser.add_argument(
+        "--simplify-tolerance",
+        default=None,
+        type=float,
+        help="Optional simplification tolerance in the source CRS units.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Rebuild the footprint even if a matching GeoJSON already exists.",
+    )
+    return parser
+
+
 def _subset_manifest_path(reference_path: Path) -> Path | None:
     candidate = reference_path.with_suffix(".json")
     if candidate.exists():
@@ -1023,6 +1246,21 @@ def main_prepare_subset(argv: list[str] | None = None) -> int:
         "year": args.year,
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def main_export_footprint(argv: list[str] | None = None) -> int:
+    parser = build_footprint_parser()
+    args = parser.parse_args(argv)
+    result = export_crome_footprint(
+        args.reference_path,
+        output_root=args.output_root,
+        year=args.year,
+        footprint_label=args.footprint_label,
+        simplify_tolerance=args.simplify_tolerance,
+        force=args.force,
+    )
+    print(json.dumps(footprint_result_to_dict(result), indent=2, sort_keys=True))
     return 0
 
 
