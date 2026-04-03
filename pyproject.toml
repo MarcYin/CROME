@@ -13,6 +13,13 @@ authors = [
   { name = "Marc Yin", email = "marcollinbobo@gmail.com" },
 ]
 keywords = ["crop-mapping", "earth-engine", "alphaearth", "geospatial"]
+classifiers = [
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
 dependencies = [
   "geopandas>=1.0",
   "numpy>=1.26",
@@ -53,4 +60,4 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py314"
