@@ -15,8 +15,10 @@ from crome.acquisition.crome import (
     HttpResponse,
     _build_search_url,
     download_crome_reference,
+    export_crome_footprint,
     extract_crome_gpkg_zip_url,
     materialize_crome_reference_subset,
+    reference_footprint,
     resolve_crome_landing_page,
 )
 from crome.config import CromeDownloadRequest
@@ -252,6 +254,80 @@ def test_download_crome_reference_writes_expected_archive_and_gpkg(tmp_path: Pat
     info = pyogrio.read_info(result.normalized_path)
     assert info["features"] == 2
     assert json.loads(result.manifest_path.read_text(encoding="utf-8"))["dataset_id"] == "complete"
+
+
+def test_reference_footprint_prefers_exact_national_layer(tmp_path: Path) -> None:
+    reference_path = tmp_path / "Crop_Map_of_England_CROME_2024.gpkg"
+    county = gpd.GeoDataFrame(
+        {
+            "lucode": ["wheat"],
+            "geometry": [Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])],
+        },
+        crs="EPSG:27700",
+    )
+    national = gpd.GeoDataFrame(
+        {
+            "lucode": ["wheat", "barley"],
+            "geometry": [
+                Polygon([(10, 10), (20, 10), (20, 20), (10, 20)]),
+                Polygon([(20, 10), (40, 10), (40, 20), (20, 20)]),
+            ],
+        },
+        crs="EPSG:27700",
+    )
+    county.to_file(reference_path, layer="Crop_Map_of_England_2024_Durham", driver="GPKG")
+    national.to_file(reference_path, layer="Crop_Map_of_England_2024", driver="GPKG")
+
+    result = reference_footprint(reference_path, year=2024)
+
+    assert result.source_layer == "Crop_Map_of_England_2024"
+    assert result.bounds == (10.0, 10.0, 40.0, 20.0)
+    assert len(result.bounds_lonlat) == 4
+
+
+def test_export_crome_footprint_prefers_exact_national_layer(tmp_path: Path) -> None:
+    reference_path = tmp_path / "Crop_Map_of_England_CROME_2024.gpkg"
+    county = gpd.GeoDataFrame(
+        {
+            "lucode": ["wheat", "barley", "oats"],
+            "geometry": [
+                Polygon([(0, 0), (1, 0), (1, 1), (0, 1)]),
+                Polygon([(1, 0), (2, 0), (2, 1), (1, 1)]),
+                Polygon([(2, 0), (3, 0), (3, 1), (2, 1)]),
+            ],
+        },
+        crs="EPSG:27700",
+    )
+    national = gpd.GeoDataFrame(
+        {
+            "lucode": ["wheat", "barley"],
+            "geometry": [
+                Polygon([(10, 10), (20, 10), (20, 20), (10, 20)]),
+                Polygon([(20, 10), (40, 10), (40, 20), (20, 20)]),
+            ],
+        },
+        crs="EPSG:27700",
+    )
+    county.to_file(reference_path, layer="Crop_Map_of_England_2024_Durham", driver="GPKG")
+    national.to_file(reference_path, layer="Crop_Map_of_England_2024", driver="GPKG")
+
+    result = export_crome_footprint(
+        reference_path,
+        output_root=tmp_path,
+        year=2024,
+        footprint_label="production",
+    )
+
+    assert result.source_layer == "Crop_Map_of_England_2024"
+    assert result.feature_count == 2
+    assert result.footprint_bounds == (10.0, 10.0, 40.0, 20.0)
+    assert result.footprint_path.exists()
+    footprint = gpd.read_file(result.footprint_path)
+    assert len(footprint) == 1
+    assert tuple(round(value, 6) for value in footprint.total_bounds) == (10.0, 10.0, 40.0, 20.0)
+    payload = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert payload["source_layer"] == "Crop_Map_of_England_2024"
+    assert payload["feature_count"] == 2
 
 
 def test_download_crome_reference_rebuilds_invalid_normalized_fgb(tmp_path: Path) -> None:

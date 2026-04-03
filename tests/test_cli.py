@@ -201,6 +201,103 @@ def test_cli_download_run_baseline_uses_env_output_root(monkeypatch, capsys) -> 
     assert payload["pipeline"]["output_root"] == "/gws/ssde/j25a/nceo_isp/public/CROME"
 
 
+def test_cli_prepare_footprint_tile_batch_dry_run_uses_centroid_and_first(tmp_path: Path, capsys) -> None:
+    reference_path = tmp_path / "Crop_Map_of_England_CROME_2024.gpkg"
+    _write_reference_gpkg(reference_path)
+
+    exit_code = cli.main(
+        [
+            "prepare-footprint-tile-batch",
+            "--year",
+            "2024",
+            "--reference-path",
+            str(reference_path),
+            "--output-root",
+            str(tmp_path / "outputs"),
+            "--dry-run",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["batch"]["artifact_unit"] == "alphaearth_feature_tile"
+    assert payload["batch"]["label_mode"] == "centroid_to_pixel"
+    assert payload["batch"]["overlap_policy"] == "first"
+    assert payload["batch"]["n_estimators"] == 400
+    assert payload["download"]["year"] == 2024
+    assert len(payload["download"]["bbox"]) == 4
+    assert payload["footprint"]["reference_path"] == str(reference_path)
+
+
+def test_cli_prepare_footprint_tile_batch_forwards_to_download_and_prepare(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    reference_path = tmp_path / "Crop_Map_of_England_CROME_2024.gpkg"
+    _write_reference_gpkg(reference_path)
+    captured: dict[str, object] = {}
+
+    def fake_download(request):
+        captured["download_request"] = request
+        output_root = tmp_path / "outputs" / "raw" / "alphaearth" / "AEF_england-crome-footprint_2024"
+        output_root.mkdir(parents=True, exist_ok=True)
+        manifest_path = output_root / "manifests" / "run.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text("{}", encoding="utf-8")
+        return SimpleNamespace(
+            aoi_label=request.aoi_label,
+            bands=request.bands,
+            collection_id=request.collection_id,
+            conditional_year=request.conditional_year,
+            manifest_path=manifest_path,
+            output_root=output_root,
+            source_image_ids=("GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL/tile-a",),
+            year=request.year,
+        )
+
+    def fake_prepare_tile_batch(**kwargs):
+        captured["prepare_kwargs"] = kwargs
+        batch_manifest_path = tmp_path / "outputs" / "workflow" / "batch_manifest.json"
+        batch_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        batch_manifest_path.write_text("{}", encoding="utf-8")
+        return SimpleNamespace(
+            batch_label=kwargs["aoi_label"],
+            batch_manifest_path=batch_manifest_path,
+            output_root=Path(kwargs["output_root"]),
+            pooled_output_dir=tmp_path / "outputs" / "training" / "pooled",
+            reference_input_path=Path(kwargs["reference_path"]),
+            reference_manifest_path=None,
+            reference_path=Path(kwargs["reference_path"]),
+            tile_manifest_paths=(tmp_path / "outputs" / "workflow" / "tile-a.json",),
+            workflow_output_root=batch_manifest_path.parent,
+            year=kwargs["year"],
+        )
+
+    monkeypatch.setattr(cli.workflow, "download_alphaearth_images", fake_download)
+    monkeypatch.setattr(cli.workflow, "prepare_tile_batch", fake_prepare_tile_batch)
+
+    exit_code = cli.main(
+        [
+            "prepare-footprint-tile-batch",
+            "--year",
+            "2024",
+            "--reference-path",
+            str(reference_path),
+            "--output-root",
+            str(tmp_path / "outputs"),
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["download_request"].aoi_label == "england-crome-footprint"
+    assert captured["prepare_kwargs"]["label_mode"] == "centroid_to_pixel"
+    assert captured["prepare_kwargs"]["overlap_policy"] == "first"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["batch"]["tile_count"] == 1
+    assert payload["download"]["year"] == 2024
+
+
 def test_cli_output_root_flag_overrides_env_default(monkeypatch, tmp_path: Path, capsys) -> None:
     monkeypatch.setenv("CROME_DATA_ROOT", "/gws/ssde/j25a/nceo_isp/public/CROME")
 
@@ -533,6 +630,51 @@ def test_cli_prepare_crome_subset_from_managed_reference(tmp_path: Path, capsys)
     assert Path(payload["reference_path"]).exists()
     assert payload["reference_manifest_path"] is not None
     assert Path(payload["reference_manifest_path"]).exists()
+
+
+def test_cli_export_crome_footprint_from_managed_reference(tmp_path: Path, capsys) -> None:
+    extracted_reference = (
+        tmp_path
+        / "raw"
+        / "crome"
+        / "CROME_2024_national"
+        / "extracted"
+        / "Crop_Map_of_England_CROME_2024.gpkg"
+    )
+    extracted_reference.parent.mkdir(parents=True, exist_ok=True)
+    crome_frame = gpd.GeoDataFrame(
+        {
+            "lucode": ["wheat", "barley"],
+            "geometry": [
+                Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+                Polygon([(2, 0), (4, 0), (4, 2), (2, 2)]),
+            ],
+        },
+        crs="EPSG:27700",
+    )
+    crome_frame.to_file(extracted_reference, layer="Crop_Map_of_England_2024", driver="GPKG")
+
+    exit_code = cli.main(
+        [
+            "export-crome-footprint",
+            "--reference-path",
+            str(extracted_reference),
+            "--year",
+            "2024",
+            "--output-root",
+            str(tmp_path / "outputs"),
+            "--footprint-label",
+            "production",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["feature_count"] == 2
+    assert payload["source_layer"] == "Crop_Map_of_England_2024"
+    assert payload["footprint_bounds"] == [0.0, 0.0, 4.0, 2.0]
+    assert Path(payload["footprint_path"]).exists()
+    assert Path(payload["manifest_path"]).exists()
 
 
 def test_cli_build_training_table_from_cache(tmp_path: Path, capsys) -> None:

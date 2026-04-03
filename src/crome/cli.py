@@ -8,6 +8,27 @@ import sys
 from crome.acquisition import alphaearth, crome
 from crome import discovery, labeling, orchestration, pipeline, predict, training, workflow
 
+_DISPATCH: dict[str, tuple[object, str]] = {
+    "download-alphaearth": (alphaearth, "main"),
+    "download-crome": (crome, "main"),
+    "prepare-crome-subset": (crome, "main_prepare_subset"),
+    "export-crome-footprint": (crome, "main_export_footprint"),
+    "list-feature-rasters": (discovery, "main"),
+    "discover-feature-rasters": (discovery, "main"),
+    "rasterize-reference": (labeling, "main"),
+    "build-training-table": (training, "main_build_training_table"),
+    "build-training-table-from-cache": (training, "main_build_training_table_from_cache"),
+    "train-pooled-model": (training, "main_train_pooled_model"),
+    "train-model": (training, "main_train_model"),
+    "predict-map": (predict, "main"),
+    "run-baseline-pipeline": (pipeline, "main"),
+    "download-run-baseline": (workflow, "main"),
+    "prepare-footprint-tile-batch": (workflow, "main_prepare_footprint_tile_batch"),
+    "prepare-tile-batch": (orchestration, "main_prepare_tile_batch"),
+    "run-tile-plan": (orchestration, "main_run_tile_plan"),
+    "train-pooled-from-tile-results": (orchestration, "main_train_pooled_from_tile_results"),
+}
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="crome", description="CROME migration utilities.")
@@ -37,6 +58,16 @@ def build_parser() -> argparse.ArgumentParser:
             or "Materialize or reuse one AOI-specific CROME subset for discovered AlphaEarth tiles."
         ),
         parents=[crome_subset_parser],
+        add_help=False,
+    )
+    crome_footprint_parser = crome.build_footprint_parser()
+    subparsers.add_parser(
+        "export-crome-footprint",
+        help=(
+            crome_footprint_parser.description
+            or "Export one dissolved annual CROME footprint GeoJSON."
+        ),
+        parents=[crome_footprint_parser],
         add_help=False,
     )
     discovery_parser = discovery.build_parser()
@@ -111,6 +142,16 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[workflow_parser],
         add_help=False,
     )
+    prepare_footprint_batch_parser = workflow.build_prepare_footprint_tile_batch_parser()
+    subparsers.add_parser(
+        "prepare-footprint-tile-batch",
+        help=(
+            prepare_footprint_batch_parser.description
+            or "Resolve one CROME year footprint, download intersecting AlphaEarth tiles, and prepare a tile batch."
+        ),
+        parents=[prepare_footprint_batch_parser],
+        add_help=False,
+    )
     prepare_tile_batch_parser = orchestration.build_prepare_tile_batch_parser()
     subparsers.add_parser(
         "prepare-tile-batch",
@@ -142,39 +183,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     forwarded = argv[1:] if argv is not None else sys.argv[2:]
-    if args.command == "download-alphaearth":
-        return alphaearth.main(forwarded)
-    if args.command == "download-crome":
-        return crome.main(forwarded)
-    if args.command == "prepare-crome-subset":
-        return crome.main_prepare_subset(forwarded)
-    if args.command == "list-feature-rasters":
-        return discovery.main(forwarded)
-    if args.command == "discover-feature-rasters":
-        return discovery.main(forwarded)
-    if args.command == "rasterize-reference":
-        return labeling.main(forwarded)
-    if args.command == "build-training-table":
-        return training.main_build_training_table(forwarded)
-    if args.command == "build-training-table-from-cache":
-        return training.main_build_training_table_from_cache(forwarded)
-    if args.command == "train-pooled-model":
-        return training.main_train_pooled_model(forwarded)
-    if args.command == "train-model":
-        return training.main_train_model(forwarded)
-    if args.command == "predict-map":
-        return predict.main(forwarded)
-    if args.command == "run-baseline-pipeline":
-        return pipeline.main(forwarded)
-    if args.command == "download-run-baseline":
-        return workflow.main(forwarded)
-    if args.command == "prepare-tile-batch":
-        return orchestration.main_prepare_tile_batch(forwarded)
-    if args.command == "run-tile-plan":
-        return orchestration.main_run_tile_plan(forwarded)
-    if args.command == "train-pooled-from-tile-results":
-        return orchestration.main_train_pooled_from_tile_results(forwarded)
-    raise ValueError(f"Unsupported command: {args.command}")
+    entry = _DISPATCH.get(args.command)
+    if entry is None:
+        raise ValueError(f"Unsupported command: {args.command}")
+    module, func_name = entry
+    return getattr(module, func_name)(forwarded)
 
 
 if __name__ == "__main__":

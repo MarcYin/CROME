@@ -1,170 +1,135 @@
 # CROME
 
-Crop classification workflows for UK crop mapping, currently centered on Sentinel-2 monthly composite scripts and an active migration toward AlphaEarth Foundations embeddings.
+UK crop classification at 10 m resolution using [AlphaEarth Foundations](https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_SATELLITE_EMBEDDING_V1_ANNUAL) satellite embeddings and [CROME](https://www.data.gov.uk/dataset/be5d88c9-acfb-4052-bf6b-ee9a416cfe60/crop-map-of-england-crome) vector references from DEFRA.
 
-## Current state
+The package replaces the legacy Sentinel-2 monthly-composite pipeline with a streamlined workflow: download AlphaEarth 64-band annual embeddings, rasterize CROME hexagon labels onto the 10 m grid, train Random Forest classifiers per tile, and predict crop maps — all from a single CLI.
 
-- legacy workflow scripts still live at the repository root
-- the new package scaffold now lives under `src/crome`
-- the migration/package/bootstrap plan is tracked in `MIGRATION_PLAN.md`
-- the package now includes a working baseline pipeline from native AlphaEarth raster discovery to tile-level CROME-aligned labels, tile-level training/model artifacts, and predicted crop rasters
-- the pipeline now writes run-level QC/provenance manifests and reusable sampled-row caches so later global model training can reuse AOI samples efficiently
-- AlphaEarth is treated as native image/AOI input data, while CROME remains a vector hexagon reference source for later 10 m label transfer
-- CROME references can now be discovered from DEFRA DSP search pages, resolved to the correct national `.gpkg.zip` asset, downloaded locally, and normalized into a FlatGeobuf reference for the pipeline
-
-## Key files
-
-- `MIGRATION_PLAN.md`
-- `pyproject.toml`
-- `src/crome/acquisition/alphaearth.py`
-- `src/crome/acquisition/crome.py`
-- `src/crome/orchestration.py`
-- `nextflow/main.nf`
-- `nextflow/nextflow.config`
-- `tests/`
-- `get_monthly_composite.py`
-- `sample_spectra.py`
-- `merge_samples.py`
-- `train_xgboost.py`
-- `reclassify_image.py`
-
-## Next planned direction
-
-- validate `edown` against `GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL` for one real UK AOI/year
-- run the unified download-to-baseline workflow in an Earth Engine-authenticated environment
-- scale the implemented baseline workflow from synthetic tests to real AOI/year runs
-- expand GitHub Actions beyond the initial package/test/docs scaffolding
-- publish and refine documentation with GitHub Pages
-
-## Implemented package workflow
-
-1. Download AlphaEarth imagery, run the baseline in one command, or point the package at an existing manifest or raw-output directory.
-2. Download the national CROME GeoPackage reference from DEFRA DSP, including legacy `- Complete` years when plain-year national datasets do not exist.
-3. Discover native AlphaEarth feature rasters and isolate per-feature artifacts.
-4. Rasterize CROME vector references onto each AlphaEarth image tile using one global crop label mapping for the whole batch.
-5. By default, transfer each CROME hexagon to the single AlphaEarth pixel containing its centroid, instead of filling every covered pixel inside the polygon.
-6. Cache immutable per-feature sampled rows so repeated AOI runs and later global training can reuse extracted training data instead of rescanning rasters.
-7. Train one tile-local training table and baseline model per AlphaEarth image tile, preserving `feature_id` and `source_image_id` lineage in cached samples for later global training.
-8. Write run-level QC/provenance with requested AOI bounds, actual raster bounds, AOI window, label coverage stats, and reference metadata.
-9. Predict a 10 m crop map per AlphaEarth image tile using that tile's local model.
-10. Rebuild larger regional or global training tables later by combining the cached per-tile sample manifests instead of rescanning rasters.
-
-## Cluster execution
-
-The repo now includes a Nextflow wrapper for cluster-parallel execution on AlphaEarth image tiles. It sits on top of three orchestration commands:
+## Quickstart
 
 ```bash
-crome prepare-tile-batch --manifest-path ./outputs/raw/alphaearth/.../manifests/run.json --reference-path ./outputs/raw/crome/.../extracted/Crop_Map_of_England_CROME_2024.gpkg --year 2024 --output-root ./outputs
-crome run-tile-plan --tile-plan ./outputs/workflow/.../tiles/<tile>.json
-crome train-pooled-from-tile-results --batch-manifest ./outputs/workflow/.../batch_manifest.json --tile-result ./outputs/workflow/.../tile-results/<tile>.tile-result.json
+pip install .            # core package
+pip install .[ee]        # adds edown for Earth Engine downloads
+pip install .[dev]       # adds pytest, ruff, build
+
+# dry-run to inspect what would be downloaded
+crome download-run-baseline \
+  --year 2024 --aoi-label east-anglia \
+  --bbox -1 51 0 52 --output-root ./outputs --dry-run
+
+# full pipeline: download, label, train, predict
+crome download-run-baseline \
+  --year 2024 --aoi-label east-anglia \
+  --bbox -1 51 0 52 --output-root ./outputs
 ```
 
-For JASMIN, the fastest practical default is the `jasmin` Nextflow profile, because the official queue guidance now limits the `standard`, `short`, and `long` QoS to single-CPU jobs, while QoS `high` on the `standard` partition allows up to `96` CPUs per job and `1000 GB` memory. The `special` partition is reserved for separate high-memory access.
+If you already have AlphaEarth rasters and a CROME reference on disk:
 
 ```bash
-nextflow run nextflow/main.nf \
-  -c nextflow/nextflow.config \
-  -profile jasmin \
-  --batch_manifest /gws/ssde/j25a/nceo_isp/public/CROME/workflow/<tile-batch-namespace>/BATCH_cambridge-norfolk_2024/batch_manifest.json \
-  --output_root /gws/ssde/j25a/nceo_isp/public/CROME \
-  --slurm_account nceo_isp
+crome run-baseline-pipeline \
+  --feature-input ./alphaearth-rasters/ \
+  --reference-path ./crome_2024.gpkg \
+  --year 2024 --output-root ./outputs
 ```
 
-The Nextflow wrapper uses:
-- one explicit `prepare-tile-batch` stage to materialize the batch subset once before launching Nextflow
-- per-tile `run-tile-plan` fan-out followed by one optional pooled gather/training step
-- in-place reads from the shared filesystem rather than staging full AlphaEarth GeoTIFFs into each task directory
+## Pipeline overview
 
-## Reference acquisition
-
-Use the standalone CROME downloader when you want a local reference copy before running the model:
-
-```bash
-crome download-crome --year 2017 --output-root ./outputs --dry-run
-crome download-crome --year 2017 --output-root ./outputs
+```
+AlphaEarth download ──> Discover rasters ──> Rasterize CROME labels
+                                                      │
+                              Predict crop map <── Train model
 ```
 
-`download-run-baseline` can also auto-download the CROME reference if you omit `--reference-path`:
+Each tile produces: labels, a training table, a Random Forest model, a prediction raster, cached training samples, and QC/provenance manifests. Cached samples can be pooled later for regional or national models without re-reading the original rasters.
+
+## Cluster execution (JASMIN)
+
+For large-area runs, a Nextflow wrapper parallelizes tiles across Slurm:
 
 ```bash
-crome download-run-baseline --year 2017 --aoi-label east-anglia --bbox -1 51 0 52 --output-root ./outputs
-```
-
-The downloader resolves DEFRA search results on `environment.data.gov.uk`, follows the dataset landing page, inspects the server-rendered file list, prefers the national `.gpkg.zip` asset, and falls back to `- Complete` variants for older nationwide releases. During live baseline runs, the package now treats the extracted national GeoPackage as the source of truth and automatically materializes or reuses a batch-specific subset under `raw/crome/.../subsets/` before rasterization.
-
-Each baseline run now writes:
-- `pipeline.json` for the high-level batch summary
-- `qc.json` for AOI-vs-raster coverage, label density, and reference provenance
-- per-tile label artifacts under `reference/.../tiles/<label-namespace>/`
-- per-tile training/model artifacts under `training/tiles/<model-namespace>/`
-- per-tile predictions under `prediction/tiles/<model-namespace>/`
-- per-tile `sample_cache_manifest.json` files for reusable sampled-row shards
-- `metrics.json` files that now include `evaluation_mode`, `accuracy`, `macro_f1`, and `weighted_f1` when a holdout split is available
-
-Those cache manifests can be combined later for efficient global model training without resampling the original rasters:
-
-```bash
-crome build-training-table-from-cache \
-  --cache-manifest ./outputs/training/tiles/<model-namespace>/TRAIN_IMAGE_FULL_2024/dataset/sample_cache_manifest.json \
-  --cache-manifest ./outputs/training/tiles/<model-namespace>/TRAIN_IMAGE_LEFT_2024/dataset/sample_cache_manifest.json \
-  --output-dir ./outputs/training/global-2024
-crome list-feature-rasters --manifest-path ./outputs/raw/alphaearth/<run>/manifests/run.json --format tsv
-crome train-pooled-model \
-  --pipeline-manifest ./outputs/training/<model-namespace>/TRAIN_RUN_A_2024/pipeline.json \
-  --pipeline-manifest ./outputs/training/<model-namespace>/TRAIN_RUN_B_2024/pipeline.json \
-  --output-dir ./outputs/training/global-2024 \
-  --max-train-rows 50000
-```
-
-The tile namespaces are derived from the label-transfer mode, reference settings, and model/training configuration so repeated runs against the same AlphaEarth image tiles do not overwrite each other.
-For very large pooled tables, `crome train-model` also accepts `--max-train-rows` so global fits can cap the training subset after the holdout split while still evaluating on the full held-out tiles.
-`crome train-pooled-model` wraps the pooled path end to end by reading prior `pipeline.json` files, gathering their cached sample manifests, building the combined table, and training the pooled model in one command.
-`crome list-feature-rasters` is the stable discovery boundary for cluster schedulers such as Nextflow: it emits `feature_id`, `tile_id`, `source_image_id`, and raster paths for one manifest or feature root.
-`crome prepare-tile-batch`, `crome run-tile-plan`, and `crome train-pooled-from-tile-results` are the stable orchestration boundary for Slurm schedulers: they prepare one tile batch from a manifest or raster root, run one tile per job without output collisions, and optionally assemble one pooled model after the tile jobs finish.
-
-## Nextflow on JASMIN
-
-The repo now includes a Slurm-oriented Nextflow wrapper under [main.nf](/home/users/marcyin/UK_crop_map/nextflow/main.nf) with queue profiles in [nextflow.config](/home/users/marcyin/UK_crop_map/nextflow/nextflow.config). The intended boundary is `crome prepare-tile-batch` once on the login node, then Nextflow fans out one `crome run-tile-plan` task per AlphaEarth image tile and optionally runs one pooled `crome train-pooled-from-tile-results` step after the tile jobs finish. The CI workflow now installs Nextflow and runs a tiny local smoke test against this wrapper. On JASMIN, the canonical wrapper also enables `cache = 'lenient'` for shared-filesystem safety and can batch tile jobs into Slurm job arrays with `--tile_array_size`.
-
-Typical JASMIN usage:
-
-```bash
+# 1. Prepare batch on login node
 crome prepare-tile-batch \
-  --manifest-path /gws/ssde/j25a/nceo_isp/public/CROME/raw/alphaearth/AEF_cambridge-fringe-smoke_annual_embedding_2024/manifests/run-20260330T213729Z.json \
-  --reference-path /gws/ssde/j25a/nceo_isp/public/CROME/raw/crome/CROME_2024_national/extracted/Crop_Map_of_England_CROME_2024.gpkg \
-  --output-root /gws/ssde/j25a/nceo_isp/public/CROME \
-  --year 2024 \
-  --aoi-label cambridge-norfolk-2024
+  --manifest-path ./outputs/raw/alphaearth/.../manifests/run.json \
+  --reference-path ./crome_2024.gpkg \
+  --year 2024 --output-root ./outputs
 
+# 2. Fan out with Nextflow
 nextflow run nextflow/main.nf \
-  -c nextflow/nextflow.config \
-  -profile jasmin \
-  --batch_manifest /gws/ssde/j25a/nceo_isp/public/CROME/workflow/<tile-batch-namespace>/BATCH_cambridge-norfolk-2024_2024/batch_manifest.json \
-  --output_root /gws/ssde/j25a/nceo_isp/public/CROME \
-  --tile_cpus 16 \
-  --tile_memory '128 GB' \
-  --pooled_cpus 48 \
-  --pooled_memory '512 GB' \
-  --slurm_account nceo_isp
+  -c nextflow/nextflow.config -profile jasmin \
+  --batch_manifest ./outputs/workflow/.../batch_manifest.json \
+  --output_root ./outputs --slurm_account my-gws
 ```
 
-The current JASMIN queue guidance supports this split well: run the lightweight `prepare-tile-batch` step outside the scheduler, use `standard` plus QoS `high` for the multi-core per-tile jobs because it allows up to `96` CPUs per job and `1000 GB` memory, and use the access-controlled `special` partition only when you need the higher-memory `special` QoS. Source: https://help.jasmin.ac.uk/docs/batch-computing/slurm-queues/
+See [docs/nextflow.md](docs/nextflow.md) for queue profiles, resource tuning, and special-partition usage.
 
-Use `-profile jasmin_special` only if your account has access to the JASMIN `special` partition. The workflow keeps the scientific contract unchanged:
+## Key commands
 
-- one task per prepared AlphaEarth image tile
-- tile-local labels, models, and predictions written by the existing `crome` CLI without batch-manifest collisions
-- pooled training assembled only from emitted per-tile `pipeline.json` manifests
-- shared sample-cache reuse preserved under the existing cache namespace layout
+| Stage | Command | Purpose |
+|-------|---------|---------|
+| Acquire | `download-alphaearth` | Download AlphaEarth embeddings via edown |
+| Acquire | `download-crome` | Download national CROME reference from DEFRA |
+| Discover | `list-feature-rasters` | Enumerate AlphaEarth rasters from manifests or directories |
+| Label | `rasterize-reference` | Rasterize CROME vectors onto the AlphaEarth grid |
+| Train | `build-training-table` | Extract feature/label training tables |
+| Train | `train-model` | Train a Random Forest classifier |
+| Predict | `predict-map` | Predict a 10 m crop raster |
+| Pipeline | `run-baseline-pipeline` | End-to-end: discover, label, train, predict |
+| Pipeline | `download-run-baseline` | Download + full pipeline in one command |
+| Cluster | `prepare-tile-batch` | Materialize per-tile plans for Nextflow/Slurm |
+| Cluster | `run-tile-plan` | Execute one tile plan |
+| Pooling | `train-pooled-from-tile-results` | Train a pooled model from tile outputs |
 
-You can set a user-specific default artifact root with:
+Run `crome <command> --help` for full usage. See the [CLI reference](docs/cli.md) for detailed examples.
+
+## Configuration
+
+Set a shared data root to avoid passing `--output-root` on every call:
 
 ```bash
 export CROME_DATA_ROOT=/gws/ssde/j25a/nceo_isp/public/CROME
 ```
 
-When `CROME_DATA_ROOT` is set, CLI commands use it as the default `--output-root`. This is opt-in and does not change the repo default for other users. An explicit `--output-root` still wins.
+The default label transfer mode is `centroid_to_pixel` (one CROME hexagon = one pixel at its centroid). Use `--label-mode polygon_to_pixel` for polygon-fill labels. See [docs/configuration.md](docs/configuration.md) for all options.
 
-The default label mode is `centroid_to_pixel`, which treats each CROME hexagon as one supervision point at the pixel containing its centroid. If you want the older polygon-fill behavior, pass `--label-mode polygon_to_pixel`.
+## Documentation
 
-The current 2024 national CROME GeoPackage is layered by county and can expose positive-area overlaps at county seams. The live baseline path now clips or reuses an AOI-specific subset from the national source before label rasterization, which avoids relying on the unstable national normalized FGB for AOI bbox reads. If you point the pipeline at a raw overlapping vector source, `--overlap-policy first` is still the pragmatic live-run override.
+Full documentation is available at the [project site](https://marcyin.github.io/CROME/) or locally under `docs/`:
+
+- [Installation](docs/installation.md) -- setup, dependencies, optional extras
+- [Architecture](docs/architecture.md) -- module map, data flow, design decisions
+- [CLI reference](docs/cli.md) -- all commands with grouped examples
+- [Configuration](docs/configuration.md) -- environment variables, label modes, output layout
+- [Nextflow on JASMIN](docs/nextflow.md) -- cluster execution with Slurm profiles
+- [Migration status](docs/migration.md) -- what is implemented, what is deferred
+
+## Development
+
+```bash
+pip install -e .[dev]
+pytest                   # 80 tests, ~15 s
+ruff check src/ tests/   # linting
+```
+
+## Project structure
+
+```
+src/crome/
+  acquisition/       AlphaEarth and CROME download helpers
+  bands.py           Canonical A00-A63 band ordering
+  cli.py             Top-level CLI with 18 subcommands
+  config.py          Frozen dataclass request/config objects
+  constants.py       Shared constants and year validation
+  discovery.py       Native raster discovery from manifests or directories
+  features.py        Feature-raster metadata reading
+  labeling.py        CROME vector rasterization onto the AlphaEarth grid
+  orchestration.py   Cluster-parallel tile batch management
+  pipeline.py        End-to-end baseline pipeline
+  predict.py         Block-wise 10 m crop prediction
+  training.py        Training table construction and Random Forest fitting
+  workflow.py        Operator-facing combined download + pipeline wrappers
+nextflow/            Nextflow wrapper for JASMIN Slurm execution
+tests/               80 tests with synthetic raster fixtures
+```
+
+## License
+
+MIT

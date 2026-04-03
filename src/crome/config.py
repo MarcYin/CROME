@@ -7,12 +7,11 @@ from typing import Any
 from .bands import ALPHAEARTH_BANDS, validate_alphaearth_bands
 from .constants import (
     ALPHAEARTH_COLLECTION_ID,
-    ALPHAEARTH_FIRST_YEAR,
-    ALPHAEARTH_LAST_ALLOWED_YEAR,
     ALPHAEARTH_LAST_STABLE_YEAR,
     ALPHAEARTH_TARGET_RESOLUTION_M,
     CROME_DEFAULT_GEOMETRY_COLUMN,
     CROME_DEFAULT_LABEL_COLUMN,
+    validate_year,
 )
 from .paths import (
     alphaearth_output_root,
@@ -47,11 +46,7 @@ class AlphaEarthDownloadRequest:
     bands: tuple[str, ...] = ALPHAEARTH_BANDS
 
     def __post_init__(self) -> None:
-        if self.year < ALPHAEARTH_FIRST_YEAR or self.year > ALPHAEARTH_LAST_ALLOWED_YEAR:
-            raise ValueError(
-                f"AlphaEarth year must be between {ALPHAEARTH_FIRST_YEAR} and "
-                f"{ALPHAEARTH_LAST_ALLOWED_YEAR}."
-            )
+        validate_year(self.year, context="AlphaEarth year")
 
         if (self.bbox is None) == (self.geojson is None):
             raise ValueError("Provide exactly one of bbox or geojson.")
@@ -117,11 +112,7 @@ class CromeReferenceConfig:
     all_touched: bool = False
 
     def __post_init__(self) -> None:
-        if self.year < ALPHAEARTH_FIRST_YEAR or self.year > ALPHAEARTH_LAST_ALLOWED_YEAR:
-            raise ValueError(
-                f"CROME reference year must be between {ALPHAEARTH_FIRST_YEAR} and "
-                f"{ALPHAEARTH_LAST_ALLOWED_YEAR}."
-            )
+        validate_year(self.year, context="CROME reference year")
         if not self.label_column:
             raise ValueError("label_column must be a non-empty string.")
         if not self.geometry_column:
@@ -162,11 +153,7 @@ class CromeDownloadRequest:
     pagesize: int = 50
 
     def __post_init__(self) -> None:
-        if self.year < ALPHAEARTH_FIRST_YEAR or self.year > ALPHAEARTH_LAST_ALLOWED_YEAR:
-            raise ValueError(
-                f"CROME download year must be between {ALPHAEARTH_FIRST_YEAR} and "
-                f"{ALPHAEARTH_LAST_ALLOWED_YEAR}."
-            )
+        validate_year(self.year, context="CROME download year")
         if self.timeout_s <= 0:
             raise ValueError("timeout_s must be positive.")
         if self.pagesize <= 0:
@@ -205,7 +192,7 @@ class AlphaEarthTrainingSpec:
     alphaearth: AlphaEarthDownloadRequest
     reference: CromeReferenceConfig
     label_mode: str = "centroid_to_pixel"
-    overlap_policy: str = "error"
+    overlap_policy: str = "first"
     nodata_label: int = -1
 
     def __post_init__(self) -> None:

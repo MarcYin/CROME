@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import pickle
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
 import rasterio
 
 from .features import read_feature_raster_spec, valid_feature_mask
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,8 +40,7 @@ def predict_crop_map(
     output_raster_path = Path(output_raster_path)
     output_raster_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with model_path.open("rb") as file:
-        bundle = pickle.load(file)
+    bundle = joblib.load(model_path)
 
     feature_names = tuple(bundle["feature_names"])
     if feature_names != feature_spec.band_names:
@@ -61,6 +63,7 @@ def predict_crop_map(
                     predicted[valid] = model.predict(valid_frame).astype("int32")
                 dst.write(predicted.reshape(features.shape[1], features.shape[2]), 1, window=window)
 
+    logger.info("Predicted crop map: %s", output_raster_path)
     metadata = {
         "feature_names": list(feature_names),
         "feature_raster_path": str(feature_raster_path),
